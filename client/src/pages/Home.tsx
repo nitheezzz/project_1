@@ -21,6 +21,7 @@ import {
   Circle,
   Clock3,
   ExternalLink,
+  FileText,
   ListTodo,
   LogOut,
   Music2,
@@ -84,6 +85,18 @@ function formatShortDate(value: string | null) {
     month: "short",
     day: "numeric",
   }).format(dateFromKey(value));
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + chunkSize)
+    );
+  }
+  return btoa(binary);
 }
 
 function statusLabel(status: TaskStatus) {
@@ -387,10 +400,12 @@ function NoteCard({
   note,
   onEdit,
   onDelete,
+  onDownloadPdf,
 }: {
   note: Note;
   onEdit: (note: Note) => void;
   onDelete: (note: Note) => void;
+  onDownloadPdf: (note: Note) => void;
 }) {
   const typeLabels = {
     study: "Study note",
@@ -418,11 +433,26 @@ function NoteCard({
         <span className="note-body">
           {note.body || "A blank page is a place to begin."}
         </span>
+        {note.pdfFileName && (
+          <span className="note-pdf-chip">
+            <FileText size={13} /> <span>{note.pdfFileName}</span>
+          </span>
+        )}
         <span className="note-date">
           {formatDay(note.date, { month: "short", day: "numeric" })}{" "}
           <ArrowUpRight size={13} />
         </span>
       </button>
+      {note.pdfStorageKey && (
+        <button
+          type="button"
+          className="note-pdf-download"
+          aria-label={`Download ${note.pdfFileName ?? "PDF attachment"}`}
+          onClick={() => onDownloadPdf(note)}
+        >
+          <FileText size={13} /> PDF
+        </button>
+      )}
       <button
         type="button"
         className="icon-action note-delete"
@@ -624,6 +654,7 @@ function Dashboard() {
   const createNote = trpc.notes.create.useMutation();
   const updateNote = trpc.notes.update.useMutation();
   const deleteNote = trpc.notes.delete.useMutation();
+  const pdfDownloadUrl = trpc.notes.pdfDownloadUrl.useMutation();
   const tasks = tasksQuery.data ?? [];
   const allTasks = allTasksQuery.data ?? [];
   const notes = notesQuery.data ?? [];
@@ -680,13 +711,19 @@ function Dashboard() {
   };
 
   const submitNote = async (draft: NoteDraft) => {
-    const values = {
-      date: draft.date,
-      title: draft.title.trim(),
-      body: draft.body.trim() || null,
-      category: draft.category,
-    };
     try {
+      const values = {
+        date: draft.date,
+        title: draft.title.trim(),
+        body: draft.body.trim() || null,
+        category: draft.category,
+        pdf: draft.pdfFile
+          ? {
+              fileName: draft.pdfFile.name,
+              contentBase64: await fileToBase64(draft.pdfFile),
+            }
+          : undefined,
+      };
       if (editingNote)
         await updateNote.mutateAsync({ id: editingNote.id, ...values });
       else await createNote.mutateAsync(values);
@@ -746,6 +783,20 @@ function Dashboard() {
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not delete this note."
+      );
+    }
+  };
+
+  const downloadNotePdf = async (note: Note) => {
+    const tab = window.open("about:blank", "_blank");
+    try {
+      const result = await pdfDownloadUrl.mutateAsync({ id: note.id });
+      if (tab) tab.location.href = result.url;
+      else window.location.assign(result.url);
+    } catch (error) {
+      tab?.close();
+      toast.error(
+        error instanceof Error ? error.message : "Could not open this PDF."
       );
     }
   };
@@ -1189,6 +1240,7 @@ function Dashboard() {
                             note={note}
                             onEdit={openNote}
                             onDelete={removeNote}
+                            onDownloadPdf={downloadNotePdf}
                           />
                         ))}
                       </AnimatePresence>

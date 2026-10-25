@@ -44,6 +44,9 @@ export const notes = mysqlTable(
     date: date("date", { mode: "string" }).notNull(),
     title: varchar("title", { length: 240 }).notNull(),
     body: text("body"),
+    pdfStorageKey: varchar("pdfStorageKey", { length: 512 }),
+    pdfFileName: varchar("pdfFileName", { length: 255 }),
+    pdfFileSize: int("pdfFileSize"),
     category: mysqlEnum("category", ["study", "planning", "reflection"])
       .default("study")
       .notNull(),

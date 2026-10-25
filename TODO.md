@@ -1,6 +1,7 @@
 # studywithfun — ToDo
 
 - [x] **Daily notes and day navigation** — Create, edit, and delete daily notes for study and general planning. Browse notes and tasks by day through a clear daily view and date navigation.
+- [x] **PDF study materials in notes** — Add PDF files from the Notes section, associate a PDF with its note, save the PDF in durable storage with its note metadata, and let the signed-in owner reopen/download it later. Files are signature-checked and limited to 8 MB; downloads require authenticated note ownership.
 - [x] **Assignable task management** — Create tasks with a title, details, and due date, plus optional study-related context. Assign tasks to a person or owner and clearly display responsibility. Track task progress with to do, in progress, and completed states.
 - [x] **Search and filtering** — Search and filter tasks and notes by date, assignment, or completion status.
 - [x] **Durable storage** — Reliably store notes, tasks, dates, assignments, and progress in the managed database so the workspace remains available across sessions and devices. The app scopes records to the signed-in account.
@@ -10,7 +11,7 @@
 
 ## Verification evidence
 
-- Managed MySQL migration created the account, notes, tasks, and user-preferences schema; schema was confirmed through a read-only information-schema query.
-- `pnpm check`, `pnpm test` (10 tests), and `pnpm build` pass.
-- Preview root and `/manus-routes.json` return HTTP 200; desktop and 375px phone screenshots confirm the account screen layout.
-- No sample account or task data was written to the shared development/production database.
+- The additive migration applied successfully; all three PDF metadata columns were confirmed with a read-only information-schema query.
+- `pnpm check`, `pnpm test` (14 tests), and `pnpm build` pass.
+- Preview home, health endpoint, and route manifest return HTTP 200.
+- No sample account, note, task, or PDF was added to the shared database/storage during validation.

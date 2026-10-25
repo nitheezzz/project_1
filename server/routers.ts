@@ -5,6 +5,9 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { sdk } from "./_core/sdk";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
+import { storageGetSignedUrl, storagePut } from "./storage";
+import { randomUUID } from "node:crypto";
+import { decodeNotePdfUpload, MAX_NOTE_PDF_BYTES } from "./pdf-attachments";
 import {
   assertLoginAllowed,
   assertRegistrationAllowed,
@@ -32,6 +35,30 @@ const passwordInput = z
   .max(128, "Passwords can be up to 128 characters.");
 const nullableShortText = (length: number) =>
   z.string().trim().max(length).nullable().optional();
+const pdfUploadInput = z.object({
+  fileName: z.string().trim().min(1).max(255),
+  contentBase64: z
+    .string()
+    .min(1)
+    .max(Math.ceil((MAX_NOTE_PDF_BYTES * 4) / 3) + 8),
+});
+
+async function storeNotePdf(
+  userId: number,
+  input: z.infer<typeof pdfUploadInput>
+) {
+  const { data, fileName } = decodeNotePdfUpload(input);
+  const stored = await storagePut(
+    `studywithfun/users/${userId}/notes/${randomUUID()}.pdf`,
+    data,
+    "application/pdf"
+  );
+  return {
+    pdfStorageKey: stored.key,
+    pdfFileName: fileName,
+    pdfFileSize: data.length,
+  };
+}
 
 const localUserProcedure = publicProcedure.use(({ ctx, next }) => {
   if (
@@ -144,9 +171,13 @@ export const appRouter = router({
           title: z.string().trim().min(1).max(240),
           body: z.string().max(12000).nullable().optional(),
           category: noteCategory,
+          pdf: pdfUploadInput.optional(),
         })
       )
-      .mutation(({ ctx, input }) => db.createNote(ctx.user.id, input)),
+      .mutation(async ({ ctx, input: { pdf, ...values } }) => {
+        const attachment = pdf ? await storeNotePdf(ctx.user.id, pdf) : {};
+        return db.createNote(ctx.user.id, { ...values, ...attachment });
+      }),
     update: localUserProcedure
       .input(
         z.object({
@@ -155,14 +186,28 @@ export const appRouter = router({
           title: z.string().trim().min(1).max(240).optional(),
           body: z.string().max(12000).nullable().optional(),
           category: noteCategory.optional(),
+          pdf: pdfUploadInput.optional(),
         })
       )
-      .mutation(({ ctx, input: { id, ...values } }) =>
-        db.updateNote(ctx.user.id, id, values)
-      ),
+      .mutation(async ({ ctx, input: { id, pdf, ...values } }) => {
+        const attachment = pdf ? await storeNotePdf(ctx.user.id, pdf) : {};
+        return db.updateNote(ctx.user.id, id, { ...values, ...attachment });
+      }),
     delete: localUserProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(({ ctx, input }) => db.deleteNote(ctx.user.id, input.id)),
+    pdfDownloadUrl: localUserProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const attachment = await db.getNoteAttachment(ctx.user.id, input.id);
+        if (!attachment?.pdfStorageKey) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "PDF attachment not found.",
+          });
+        }
+        return { url: await storageGetSignedUrl(attachment.pdfStorageKey) };
+      }),
   }),
   tasks: router({
     list: localUserProcedure

@@ -136,6 +136,19 @@ export async function createNote(
   return { success: true } as const;
 }
 
+export async function getNoteAttachment(userId: number, id: number) {
+  const db = requireDb(await getDb());
+  const [note] = await db
+    .select({
+      pdfStorageKey: notes.pdfStorageKey,
+      pdfFileName: notes.pdfFileName,
+    })
+    .from(notes)
+    .where(and(eq(notes.id, id), eq(notes.userId, userId)))
+    .limit(1);
+  return note ?? null;
+}
+
 export async function updateNote(
   userId: number,
   id: number,

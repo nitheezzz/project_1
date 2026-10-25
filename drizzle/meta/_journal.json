@@ -15,6 +15,13 @@
       "when": 1792929842426,
       "tag": "0001_zippy_kronos",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1792932324325,
+      "tag": "0002_daily_maestro",
+      "breakpoints": true
     }
   ]
 }
