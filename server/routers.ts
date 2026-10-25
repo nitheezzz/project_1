@@ -16,10 +16,13 @@ import {
   recordLoginFailure,
   recordRegistrationAttempt,
   registerPasswordUser,
+  hashPassword,
+  verifyPassword,
 } from "./account-security";
 import * as db from "./db";
 
 const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
+const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const noteCategory = z.enum(["study", "planning", "reflection"]);
 const taskStatus = z.enum(["todo", "in_progress", "done"]);
 const priority = z.enum(["low", "normal", "high"]);
@@ -96,6 +99,8 @@ function publicAccount(ctx: { user: import("../drizzle/schema").User | null }) {
     username: user.username,
     name: user.name,
     email: user.email,
+    bio: user.bio,
+    profileColor: user.profileColor,
   };
 }
 
@@ -140,6 +145,50 @@ export const appRouter = router({
         clearLoginFailures(ip, input.username);
         await db.upsertUser({ openId: user.openId, lastSignedIn: new Date() });
         await startAccountSession(ctx, user);
+        return { success: true } as const;
+      }),
+    updateProfile: localUserProcedure
+      .input(
+        z.object({
+          name: z.string().trim().min(1).max(50),
+          bio: z.string().trim().max(180).nullable(),
+          profileColor: z.enum(["sage", "ocean", "violet", "amber"]),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        await db.updateUserProfile(ctx.user.id, input);
+        return { success: true } as const;
+      }),
+    changePassword: localUserProcedure
+      .input(
+        z.object({
+          currentPassword: passwordInput,
+          newPassword: passwordInput,
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const ip = ctx.req.ip || ctx.req.socket.remoteAddress || "unknown";
+        const username = ctx.user.username ?? "unknown";
+        assertLoginAllowed(ip, username);
+        if (
+          !(await verifyPassword(input.currentPassword, ctx.user.passwordHash))
+        ) {
+          recordLoginFailure(ip, username);
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Your current password isn’t correct.",
+          });
+        }
+        clearLoginFailures(ip, username);
+        if (input.currentPassword === input.newPassword) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message:
+              "Choose a new password that differs from your current one.",
+          });
+        }
+        const passwordHash = await hashPassword(input.newPassword);
+        await db.updateUserPassword(ctx.user.id, passwordHash);
         return { success: true } as const;
       }),
     me: publicProcedure.query(({ ctx }) => publicAccount(ctx)),
@@ -229,7 +278,127 @@ export const appRouter = router({
         db.removeStudyMaterial(ctx.user.id, input.id)
       ),
   }),
+  friends: router({
+    search: localUserProcedure
+      .input(
+        z.object({
+          query: z
+            .string()
+            .trim()
+            .min(2)
+            .max(24)
+            .regex(/^[a-zA-Z0-9_]+$/),
+        })
+      )
+      .query(({ ctx, input }) =>
+        db.searchFriendAccounts(ctx.user.id, input.query)
+      ),
+    list: localUserProcedure.query(({ ctx }) =>
+      db.listFriendships(ctx.user.id)
+    ),
+    requests: localUserProcedure.query(({ ctx }) =>
+      db.listFriendRequests(ctx.user.id)
+    ),
+    sendRequest: localUserProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        if (input.userId === ctx.user.id) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "You can’t add yourself.",
+          });
+        }
+        if (!(await db.getFriendAccountById(input.userId))) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "That account is unavailable.",
+          });
+        }
+        if (await db.areFriends(ctx.user.id, input.userId)) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "You’re already friends.",
+          });
+        }
+        const requests = await db.listFriendRequests(ctx.user.id);
+        if (requests.incoming.some(item => item.user.id === input.userId)) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message:
+              "They’ve already sent you a request. Accept it from your inbox.",
+          });
+        }
+        return db.createOrRefreshFriendRequest(ctx.user.id, input.userId);
+      }),
+    respond: localUserProcedure
+      .input(
+        z.object({
+          requestId: z.number().int().positive(),
+          accept: z.boolean(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const result = await db.respondToFriendRequest(
+          ctx.user.id,
+          input.requestId,
+          input.accept
+        );
+        if (!result.success)
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Friend request not found.",
+          });
+        return result;
+      }),
+    remove: localUserProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!(await db.areFriends(ctx.user.id, input.userId))) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Friend not found.",
+          });
+        }
+        return db.removeFriendship(ctx.user.id, input.userId);
+      }),
+    messages: router({
+      list: localUserProcedure
+        .input(z.object({ friendId: z.number().int().positive() }))
+        .query(async ({ ctx, input }) => {
+          if (!(await db.areFriends(ctx.user.id, input.friendId))) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "Only friends can open this conversation.",
+            });
+          }
+          return db.listDirectMessages(ctx.user.id, input.friendId);
+        }),
+      send: localUserProcedure
+        .input(
+          z.object({
+            friendId: z.number().int().positive(),
+            body: z.string().trim().min(1).max(3000),
+          })
+        )
+        .mutation(async ({ ctx, input }) => {
+          if (!(await db.areFriends(ctx.user.id, input.friendId))) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "You can only message an accepted friend.",
+            });
+          }
+          return db.createDirectMessage(
+            ctx.user.id,
+            input.friendId,
+            input.body
+          );
+        }),
+    }),
+  }),
   tasks: router({
+    reminders: localUserProcedure.query(({ ctx }) =>
+      db.listTaskReminders(ctx.user.id)
+    ),
     list: localUserProcedure
       .input(
         z.object({
@@ -246,6 +415,7 @@ export const appRouter = router({
           title: z.string().trim().min(1).max(240),
           details: z.string().max(12000).nullable().optional(),
           dueDate: z.string().regex(dayPattern),
+          dueTime: z.string().regex(timePattern).default("17:00"),
           assignee: nullableShortText(160),
           studyContext: nullableShortText(180),
           status: taskStatus.default("todo"),
@@ -260,6 +430,7 @@ export const appRouter = router({
           title: z.string().trim().min(1).max(240).optional(),
           details: z.string().max(12000).nullable().optional(),
           dueDate: z.string().regex(dayPattern).optional(),
+          dueTime: z.string().regex(timePattern).optional(),
           assignee: nullableShortText(160),
           studyContext: nullableShortText(180),
           status: taskStatus.optional(),

@@ -1,10 +1,13 @@
-import { and, asc, desc, eq, isNull, like, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, like, ne, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   InsertNote,
   InsertStudyMaterial,
   InsertTask,
   InsertUser,
+  directMessages,
+  friendRequests,
+  friendships,
   notes,
   studyMaterials,
   tasks,
@@ -89,6 +92,21 @@ export async function getUserByUsername(
     .where(eq(users.username, username))
     .limit(1);
   return result[0];
+}
+
+export async function updateUserProfile(
+  userId: number,
+  values: { name: string; bio: string | null; profileColor: string }
+) {
+  const db = requireDb(await getDb());
+  await db.update(users).set(values).where(eq(users.id, userId));
+  return { success: true } as const;
+}
+
+export async function updateUserPassword(userId: number, passwordHash: string) {
+  const db = requireDb(await getDb());
+  await db.update(users).set({ passwordHash }).where(eq(users.id, userId));
+  return { success: true } as const;
 }
 
 export async function createPasswordUser(values: {
@@ -247,6 +265,22 @@ export async function listTasks(
     .limit(100);
 }
 
+export async function listTaskReminders(userId: number) {
+  const db = requireDb(await getDb());
+  return db
+    .select({
+      id: tasks.id,
+      title: tasks.title,
+      status: tasks.status,
+      dueDate: tasks.dueDate,
+      dueTime: tasks.dueTime,
+    })
+    .from(tasks)
+    .where(and(eq(tasks.userId, userId), ne(tasks.status, "done")))
+    .orderBy(asc(tasks.dueDate), asc(tasks.dueTime), asc(tasks.id))
+    .limit(5000);
+}
+
 export async function createTask(
   userId: number,
   values: Omit<InsertTask, "id" | "userId" | "createdAt" | "updatedAt">
@@ -272,5 +306,276 @@ export async function updateTask(
 export async function deleteTask(userId: number, id: number) {
   const db = requireDb(await getDb());
   await db.delete(tasks).where(and(eq(tasks.id, id), eq(tasks.userId, userId)));
+  return { success: true } as const;
+}
+
+export async function searchFriendAccounts(userId: number, query: string) {
+  const db = requireDb(await getDb());
+  const escaped = query
+    .trim()
+    .toLowerCase()
+    .replace(/[\\%_]/g, "\\$&");
+  const term = `%${escaped}%`;
+  return db
+    .select({
+      id: users.id,
+      username: users.username,
+      name: users.name,
+      profileColor: users.profileColor,
+    })
+    .from(users)
+    .where(
+      and(
+        ne(users.id, userId),
+        eq(users.loginMethod, "password"),
+        like(users.username, term)
+      )
+    )
+    .orderBy(asc(users.username))
+    .limit(20);
+}
+
+export async function getFriendAccountById(userId: number) {
+  const db = requireDb(await getDb());
+  const [account] = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      name: users.name,
+      profileColor: users.profileColor,
+    })
+    .from(users)
+    .where(and(eq(users.id, userId), eq(users.loginMethod, "password")))
+    .limit(1);
+  return account ?? null;
+}
+
+export async function listFriendships(userId: number) {
+  const db = requireDb(await getDb());
+  const pairs = await db
+    .select({ low: friendships.userLowId, high: friendships.userHighId })
+    .from(friendships)
+    .where(
+      or(eq(friendships.userLowId, userId), eq(friendships.userHighId, userId))
+    )
+    .orderBy(desc(friendships.createdAt))
+    .limit(200);
+  const friendIds = pairs.map(pair =>
+    pair.low === userId ? pair.high : pair.low
+  );
+  if (!friendIds.length) return [];
+  return db
+    .select({
+      id: users.id,
+      username: users.username,
+      name: users.name,
+      profileColor: users.profileColor,
+    })
+    .from(users)
+    .where(inArray(users.id, friendIds))
+    .orderBy(asc(users.username))
+    .limit(200);
+}
+
+export async function listFriendRequests(userId: number) {
+  const db = requireDb(await getDb());
+  const incoming = await db
+    .select({
+      id: friendRequests.id,
+      createdAt: friendRequests.createdAt,
+      user: {
+        id: users.id,
+        username: users.username,
+        name: users.name,
+        profileColor: users.profileColor,
+      },
+    })
+    .from(friendRequests)
+    .innerJoin(users, eq(friendRequests.fromUserId, users.id))
+    .where(
+      and(
+        eq(friendRequests.toUserId, userId),
+        eq(friendRequests.status, "pending")
+      )
+    )
+    .orderBy(desc(friendRequests.createdAt))
+    .limit(50);
+  const outgoing = await db
+    .select({
+      id: friendRequests.id,
+      createdAt: friendRequests.createdAt,
+      user: {
+        id: users.id,
+        username: users.username,
+        name: users.name,
+        profileColor: users.profileColor,
+      },
+    })
+    .from(friendRequests)
+    .innerJoin(users, eq(friendRequests.toUserId, users.id))
+    .where(
+      and(
+        eq(friendRequests.fromUserId, userId),
+        eq(friendRequests.status, "pending")
+      )
+    )
+    .orderBy(desc(friendRequests.createdAt))
+    .limit(50);
+  return { incoming, outgoing };
+}
+
+export async function areFriends(userId: number, friendId: number) {
+  const db = requireDb(await getDb());
+  const low = Math.min(userId, friendId);
+  const high = Math.max(userId, friendId);
+  const [friendship] = await db
+    .select({ id: friendships.id })
+    .from(friendships)
+    .where(
+      and(eq(friendships.userLowId, low), eq(friendships.userHighId, high))
+    )
+    .limit(1);
+  return Boolean(friendship);
+}
+
+export async function createOrRefreshFriendRequest(
+  fromUserId: number,
+  toUserId: number
+) {
+  const db = requireDb(await getDb());
+  const [existing] = await db
+    .select({ id: friendRequests.id, status: friendRequests.status })
+    .from(friendRequests)
+    .where(
+      and(
+        eq(friendRequests.fromUserId, fromUserId),
+        eq(friendRequests.toUserId, toUserId)
+      )
+    )
+    .limit(1);
+  if (existing?.status === "pending") return { success: true, pending: true };
+  if (existing) {
+    await db
+      .update(friendRequests)
+      .set({ status: "pending", updatedAt: new Date() })
+      .where(eq(friendRequests.id, existing.id));
+  } else {
+    await db
+      .insert(friendRequests)
+      .values({ fromUserId, toUserId })
+      .onDuplicateKeyUpdate({
+        set: { status: "pending", updatedAt: new Date() },
+      });
+  }
+  return { success: true, pending: false };
+}
+
+export async function respondToFriendRequest(
+  userId: number,
+  requestId: number,
+  accept: boolean
+) {
+  const db = requireDb(await getDb());
+  const [request] = await db
+    .select({
+      fromUserId: friendRequests.fromUserId,
+      status: friendRequests.status,
+    })
+    .from(friendRequests)
+    .where(
+      and(eq(friendRequests.id, requestId), eq(friendRequests.toUserId, userId))
+    )
+    .limit(1);
+  if (!request) return { success: false } as const;
+  if (
+    accept &&
+    request.status === "accepted" &&
+    (await areFriends(userId, request.fromUserId))
+  ) {
+    return { success: true } as const;
+  }
+  if (request.status !== "pending") return { success: false } as const;
+  if (accept) {
+    const low = Math.min(userId, request.fromUserId);
+    const high = Math.max(userId, request.fromUserId);
+    await db
+      .insert(friendships)
+      .values({ userLowId: low, userHighId: high })
+      .onDuplicateKeyUpdate({ set: { userLowId: low } });
+    await db
+      .update(friendRequests)
+      .set({ status: "accepted", updatedAt: new Date() })
+      .where(
+        and(
+          eq(friendRequests.status, "pending"),
+          or(
+            and(
+              eq(friendRequests.fromUserId, request.fromUserId),
+              eq(friendRequests.toUserId, userId)
+            ),
+            and(
+              eq(friendRequests.fromUserId, userId),
+              eq(friendRequests.toUserId, request.fromUserId)
+            )
+          )
+        )
+      );
+  } else {
+    await db
+      .update(friendRequests)
+      .set({ status: "declined", updatedAt: new Date() })
+      .where(eq(friendRequests.id, requestId));
+  }
+  return { success: true } as const;
+}
+
+export async function removeFriendship(userId: number, friendId: number) {
+  const db = requireDb(await getDb());
+  await db
+    .delete(friendships)
+    .where(
+      and(
+        eq(friendships.userLowId, Math.min(userId, friendId)),
+        eq(friendships.userHighId, Math.max(userId, friendId))
+      )
+    );
+  return { success: true } as const;
+}
+
+export async function listDirectMessages(userId: number, friendId: number) {
+  const db = requireDb(await getDb());
+  const items = await db
+    .select({
+      id: directMessages.id,
+      senderId: directMessages.senderId,
+      recipientId: directMessages.recipientId,
+      body: directMessages.body,
+      createdAt: directMessages.createdAt,
+    })
+    .from(directMessages)
+    .where(
+      or(
+        and(
+          eq(directMessages.senderId, userId),
+          eq(directMessages.recipientId, friendId)
+        ),
+        and(
+          eq(directMessages.senderId, friendId),
+          eq(directMessages.recipientId, userId)
+        )
+      )
+    )
+    .orderBy(desc(directMessages.createdAt), desc(directMessages.id))
+    .limit(100);
+  return items.reverse();
+}
+
+export async function createDirectMessage(
+  senderId: number,
+  recipientId: number,
+  body: string
+) {
+  const db = requireDb(await getDb());
+  await db.insert(directMessages).values({ senderId, recipientId, body });
   return { success: true } as const;
 }

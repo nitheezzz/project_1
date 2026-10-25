@@ -19,6 +19,8 @@ export const users = mysqlTable(
     username: varchar("username", { length: 24 }),
     passwordHash: text("passwordHash"),
     name: text("name"),
+    bio: varchar("bio", { length: 180 }),
+    profileColor: varchar("profileColor", { length: 16 }).default("sage"),
     email: varchar("email", { length: 320 }),
     loginMethod: varchar("loginMethod", { length: 64 }),
     role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
@@ -33,6 +35,78 @@ export const users = mysqlTable(
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+
+export const friendRequests = mysqlTable(
+  "friend_requests",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    fromUserId: int("fromUserId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    toUserId: int("toUserId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    status: mysqlEnum("status", ["pending", "accepted", "declined"])
+      .default("pending")
+      .notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  table => ({
+    pairUnique: uniqueIndex("friend_requests_pair_unique").on(
+      table.fromUserId,
+      table.toUserId
+    ),
+    inboxIdx: index("friend_requests_inbox_idx").on(
+      table.toUserId,
+      table.status
+    ),
+  })
+);
+
+export const friendships = mysqlTable(
+  "friendships",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userLowId: int("userLowId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    userHighId: int("userHighId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    pairUnique: uniqueIndex("friendships_pair_unique").on(
+      table.userLowId,
+      table.userHighId
+    ),
+    lowIdx: index("friendships_low_idx").on(table.userLowId),
+    highIdx: index("friendships_high_idx").on(table.userHighId),
+  })
+);
+
+export const directMessages = mysqlTable(
+  "direct_messages",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    senderId: int("senderId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    recipientId: int("recipientId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    body: varchar("body", { length: 3000 }).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    conversationIdx: index("direct_messages_conversation_idx").on(
+      table.senderId,
+      table.recipientId,
+      table.createdAt
+    ),
+  })
+);
 
 export const notes = mysqlTable(
   "notes",
@@ -97,6 +171,7 @@ export const tasks = mysqlTable(
     title: varchar("title", { length: 240 }).notNull(),
     details: text("details"),
     dueDate: date("dueDate", { mode: "string" }),
+    dueTime: varchar("dueTime", { length: 5 }).default("17:00").notNull(),
     assignee: varchar("assignee", { length: 160 }),
     studyContext: varchar("studyContext", { length: 180 }),
     status: mysqlEnum("status", ["todo", "in_progress", "done"])

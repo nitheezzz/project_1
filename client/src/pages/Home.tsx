@@ -1,5 +1,7 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { NoteDialog, type NoteDraft } from "@/components/NoteDialog";
+import { ProfileDialog } from "@/components/ProfileDialog";
+import { FriendsWorkspace } from "@/components/FriendsWorkspace";
 import { TaskDialog, type TaskDraft } from "@/components/TaskDialog";
 import { Button } from "@/components/ui/button";
 import { StudyMaterialsLibrary } from "@/components/StudyMaterialsLibrary";
@@ -7,11 +9,12 @@ import { trpc } from "@/lib/trpc";
 import type { Note, Task } from "../../../drizzle/schema";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  ArrowDownRight,
   ArrowLeft,
   ArrowRight,
   ArrowUpRight,
   BookOpen,
+  Bell,
+  BellOff,
   CalendarDays,
   Check,
   CheckCheck,
@@ -20,7 +23,6 @@ import {
   ChevronRight,
   Circle,
   Clock3,
-  ExternalLink,
   FolderOpen,
   ListTodo,
   LogOut,
@@ -34,7 +36,7 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 const pageMotion = {
@@ -44,7 +46,7 @@ const pageMotion = {
   transition: { duration: 0.28, ease: "easeOut" as const },
 };
 
-type View = "today" | "tasks" | "notes" | "materials";
+type View = "today" | "tasks" | "notes" | "materials" | "friends";
 type TaskStatus = "todo" | "in_progress" | "done";
 
 const navItems: { id: View; label: string; icon: typeof CalendarDays }[] = [
@@ -52,6 +54,7 @@ const navItems: { id: View; label: string; icon: typeof CalendarDays }[] = [
   { id: "tasks", label: "My tasks", icon: ListTodo },
   { id: "notes", label: "Study notes", icon: NotebookPen },
   { id: "materials", label: "Study materials", icon: FolderOpen },
+  { id: "friends", label: "Friends", icon: UsersRound },
 ];
 
 function todayKey() {
@@ -85,6 +88,24 @@ function formatShortDate(value: string | null) {
     month: "short",
     day: "numeric",
   }).format(dateFromKey(value));
+}
+
+function formatShortTime(value: string | null | undefined) {
+  const [hours = "17", minutes = "00"] = (value ?? "17:00").split(":");
+  const date = new Date();
+  date.setHours(Number(hours), Number(minutes), 0, 0);
+  return new Intl.DateTimeFormat("en", {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function getReminderPreference() {
+  try {
+    return localStorage.getItem("studywithfun:task-reminders") === "on";
+  } catch {
+    return false;
+  }
 }
 
 function statusLabel(status: TaskStatus) {
@@ -360,7 +381,7 @@ function TaskRow({
           {task.dueDate && (
             <span className="task-date">
               <Clock3 size={12} />
-              {formatShortDate(task.dueDate)}
+              {formatShortDate(task.dueDate)} · {formatShortTime(task.dueTime)}
             </span>
           )}
         </span>
@@ -445,11 +466,19 @@ function Dashboard() {
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [noteDialogOpen, setNoteDialogOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [remindersEnabled, setRemindersEnabled] = useState(
+    getReminderPreference
+  );
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editingNote, setEditingNote] = useState<Note | null>(null);
+  const deliveredReminderKeys = useRef(new Set<string>());
   const utils = trpc.useUtils();
   const normalizedSearch = search.trim() || undefined;
   const allTasksQuery = trpc.tasks.list.useQuery({ date: selectedDate });
+  const reminderTasksQuery = trpc.tasks.reminders.useQuery(undefined, {
+    refetchInterval: 60_000,
+  });
   const tasksQuery = trpc.tasks.list.useQuery({
     date: selectedDate,
     status: statusFilter === "all" ? undefined : statusFilter,
@@ -468,6 +497,7 @@ function Dashboard() {
   const deleteNote = trpc.notes.delete.useMutation();
   const tasks = tasksQuery.data ?? [];
   const allTasks = allTasksQuery.data ?? [];
+  const reminderTasks = reminderTasksQuery.data ?? [];
   const notes = notesQuery.data ?? [];
   const doneCount = allTasks.filter(task => task.status === "done").length;
   const progress = allTasks.length
@@ -493,7 +523,106 @@ function Dashboard() {
 
   const invalidateData = () => {
     void utils.tasks.list.invalidate();
+    void utils.tasks.reminders.invalidate();
     void utils.notes.list.invalidate();
+  };
+
+  useEffect(() => {
+    if (!remindersEnabled || reminderTasks.length === 0) return;
+    const checkDeadlines = () => {
+      const now = Date.now();
+      let delivered: string[] = [];
+      try {
+        const saved = localStorage.getItem("studywithfun:task-reminders-sent");
+        const parsed: unknown = saved ? JSON.parse(saved) : [];
+        delivered = Array.isArray(parsed)
+          ? parsed.filter((item): item is string => typeof item === "string")
+          : [];
+      } catch {
+        delivered = [];
+      }
+      for (const key of delivered) deliveredReminderKeys.current.add(key);
+      const sent = deliveredReminderKeys.current;
+      for (const task of reminderTasks) {
+        if (task.status === "done" || !task.dueDate) continue;
+        const time = task.dueTime || "17:00";
+        const reminderKey = `${task.id}:${task.dueDate}:${time}`;
+        const dueAt = new Date(`${task.dueDate}T${time}:00`).getTime();
+        if (!Number.isFinite(dueAt) || dueAt > now || sent.has(reminderKey))
+          continue;
+        toast.warning(`Task due: ${task.title}`, {
+          description: `Deadline: ${formatShortDate(task.dueDate)} at ${formatShortTime(time)}.`,
+          duration: 12_000,
+        });
+        try {
+          if (
+            typeof Notification !== "undefined" &&
+            Notification.permission === "granted"
+          ) {
+            new Notification(`Task due: ${task.title}`, {
+              body: `Deadline: ${formatShortDate(task.dueDate)} at ${formatShortTime(time)}.`,
+              tag: `studywithfun-task-${task.id}`,
+            });
+          }
+        } catch {
+          // The in-app alert is still shown when the browser blocks notifications.
+        }
+        sent.add(reminderKey);
+      }
+      try {
+        localStorage.setItem(
+          "studywithfun:task-reminders-sent",
+          JSON.stringify(Array.from(sent).slice(-1000))
+        );
+      } catch {
+        // Browser storage may be unavailable in private browsing modes.
+      }
+    };
+    checkDeadlines();
+    const timer = window.setInterval(checkDeadlines, 30_000);
+    return () => window.clearInterval(timer);
+  }, [remindersEnabled, reminderTasks]);
+
+  const enableReminders = async () => {
+    if (typeof Notification === "undefined") {
+      toast.error("This browser does not support notifications.");
+      return;
+    }
+    let permission: NotificationPermission;
+    try {
+      permission =
+        Notification.permission === "granted"
+          ? "granted"
+          : await Notification.requestPermission();
+    } catch {
+      toast.error(
+        "This browser could not enable notifications. Check its site permissions."
+      );
+      return;
+    }
+    if (permission !== "granted") {
+      toast.error(
+        "Allow notifications in browser settings to enable reminders."
+      );
+      return;
+    }
+    try {
+      localStorage.setItem("studywithfun:task-reminders", "on");
+    } catch {
+      // The setting remains active for this open session.
+    }
+    setRemindersEnabled(true);
+    toast.success("Task reminders are on while studywithfun is open.");
+  };
+
+  const disableReminders = () => {
+    try {
+      localStorage.removeItem("studywithfun:task-reminders");
+    } catch {
+      // The setting still turns off for this open session.
+    }
+    setRemindersEnabled(false);
+    toast.success("Task reminders are off.");
   };
 
   const submitTask = async (draft: TaskDraft) => {
@@ -501,6 +630,7 @@ function Dashboard() {
       title: draft.title.trim(),
       details: draft.details.trim() || null,
       dueDate: draft.dueDate,
+      dueTime: draft.dueTime,
       assignee: draft.assignee.trim() || null,
       studyContext: draft.studyContext.trim() || null,
       status: draft.status,
@@ -644,22 +774,28 @@ function Dashboard() {
             </button>
           ))}
         </nav>
-        <div className="sidebar-note">
-          <div className="sidebar-note-icon">
-            <Sparkles size={14} />
-          </div>
-          <p>Small steps add up.</p>
-          <span>You’re building a rhythm, one day at a time.</span>
-        </div>
         <div className="sidebar-bottom">
           <div className="user-chip">
-            <div className="user-avatar">
-              {user.username?.slice(0, 1).toUpperCase() || "D"}
-            </div>
-            <div className="user-info">
-              <span className="user-name">{user.username}</span>
-              <span className="user-caption">Personal workspace</span>
-            </div>
+            <button
+              type="button"
+              className="profile-open"
+              aria-label="Customize profile"
+              onClick={() => setProfileOpen(true)}
+            >
+              <div
+                className={`user-avatar avatar-${user.profileColor ?? "sage"}`}
+              >
+                {(user.name?.trim() || user.username)
+                  ?.slice(0, 1)
+                  .toUpperCase() || "D"}
+              </div>
+              <div className="user-info">
+                <span className="user-name">
+                  {user.name?.trim() || user.username}
+                </span>
+                <span className="user-caption">Edit your profile</span>
+              </div>
+            </button>
             <button
               type="button"
               className="logout-button"
@@ -694,7 +830,7 @@ function Dashboard() {
             <ChevronRight size={14} />
             <strong>{navItems.find(item => item.id === view)?.label}</strong>
           </div>
-          {view !== "materials" && (
+          {view !== "materials" && view !== "friends" && (
             <div className="topbar-actions">
               <label className="search-box">
                 <Search size={16} />
@@ -706,6 +842,29 @@ function Dashboard() {
                 />
                 <kbd>/</kbd>
               </label>
+              <button
+                type="button"
+                className={`reminder-toggle ${remindersEnabled ? "enabled" : ""}`}
+                aria-pressed={remindersEnabled}
+                aria-label={
+                  remindersEnabled
+                    ? "Turn task reminders off"
+                    : "Turn task reminders on"
+                }
+                title={
+                  remindersEnabled
+                    ? "Turn task reminders off"
+                    : "Turn task reminders on"
+                }
+                onClick={() =>
+                  void (remindersEnabled
+                    ? disableReminders()
+                    : enableReminders())
+                }
+              >
+                {remindersEnabled ? <Bell size={15} /> : <BellOff size={15} />}
+                <span>{remindersEnabled ? "Reminders on" : "Remind me"}</span>
+              </button>
               <Button
                 size="sm"
                 className="primary-button top-add-button"
@@ -715,12 +874,30 @@ function Dashboard() {
               </Button>
             </div>
           )}
+          <button
+            type="button"
+            className="topbar-profile"
+            aria-label="Open profile settings"
+            title="Profile settings"
+            onClick={() => setProfileOpen(true)}
+          >
+            <span
+              className={`user-avatar avatar-${user.profileColor ?? "sage"}`}
+            >
+              {(user.name?.trim() || user.username)
+                ?.slice(0, 1)
+                .toUpperCase() || "D"}
+            </span>
+          </button>
         </header>
 
         <div className="page-content">
           {view === "materials" && <StudyMaterialsLibrary />}
+          {view === "friends" && user && (
+            <FriendsWorkspace currentUserId={user.id} />
+          )}
           <section
-            className={`day-toolbar ${view === "materials" ? "view-hidden" : ""}`}
+            className={`day-toolbar ${view === "materials" || view === "friends" ? "view-hidden" : ""}`}
           >
             <div>
               <span className="eyebrow">
@@ -860,7 +1037,7 @@ function Dashboard() {
           )}
 
           <div
-            className={`dashboard-grid ${view === "materials" ? "view-hidden" : ""}`}
+            className={`dashboard-grid ${view === "materials" || view === "friends" ? "view-hidden" : ""}`}
           >
             <div className="primary-column">
               {showTasks && (
@@ -1079,23 +1256,6 @@ function Dashboard() {
             </div>
 
             <aside className="secondary-column">
-              <section className="small-note-card">
-                <div className="small-note-top">
-                  <span className="small-note-icon">
-                    <Sparkles size={14} />
-                  </span>
-                  <span> A SOFTER REMINDER</span>
-                </div>
-                <p>
-                  Focus isn’t doing more.
-                  <br />
-                  <em>It’s choosing what matters now.</em>
-                </p>
-                <div className="small-note-bottom">
-                  <span>YOUR WORKSPACE</span>
-                  <ArrowDownRight size={15} />
-                </div>
-              </section>
               <div className="privacy-callout">
                 <div>
                   <PanelTop size={14} />
@@ -1138,6 +1298,11 @@ function Dashboard() {
         date={selectedDate}
         saving={createNote.isPending || updateNote.isPending}
         onSave={submitNote}
+      />
+      <ProfileDialog
+        open={profileOpen}
+        onOpenChange={setProfileOpen}
+        user={user}
       />
     </motion.div>
   );

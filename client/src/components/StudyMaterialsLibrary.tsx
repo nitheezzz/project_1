@@ -1,14 +1,17 @@
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Download,
+  Eye,
   FileText,
   FolderOpen,
+  Plus,
   Search,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
-import { motion } from "framer-motion";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -41,7 +44,13 @@ export function StudyMaterialsLibrary() {
   const [description, setDescription] = useState("");
   const [search, setSearch] = useState("");
   const [fileError, setFileError] = useState("");
+  const [showUploadForm, setShowUploadForm] = useState(false);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [openingId, setOpeningId] = useState<number | null>(null);
   const materials = materialsQuery.data ?? [];
+  const selectedMaterial =
+    materials.find(item => item.id === selectedId) ?? null;
   const filteredMaterials = useMemo(() => {
     const query = search.trim().toLowerCase();
     return query
@@ -73,6 +82,40 @@ export function StudyMaterialsLibrary() {
     setTitle(previous => previous || selected.name.replace(/\.pdf$/i, ""));
   };
 
+  const viewMaterial = async (id: number) => {
+    setOpeningId(id);
+    setSelectedId(id);
+    try {
+      const result = await downloadMaterial.mutateAsync({ id });
+      setPreviewUrl(result.url);
+    } catch (error) {
+      setPreviewUrl("");
+      toast.error(
+        error instanceof Error ? error.message : "Could not open this PDF."
+      );
+    } finally {
+      setOpeningId(null);
+    }
+  };
+
+  const downloadMaterialFile = async (id: number) => {
+    const tab = window.open("about:blank", "_blank");
+    if (!tab) {
+      toast.error("Allow pop-ups for this site to open the PDF download.");
+      return;
+    }
+    tab.opener = null;
+    try {
+      const result = await downloadMaterial.mutateAsync({ id });
+      tab.location.replace(result.url);
+    } catch (error) {
+      tab.close();
+      toast.error(
+        error instanceof Error ? error.message : "Could not open this PDF."
+      );
+    }
+  };
+
   const submitUpload = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!file || !title.trim()) return;
@@ -83,29 +126,17 @@ export function StudyMaterialsLibrary() {
         fileName: file.name,
         contentBase64: await toBase64(file),
       });
-      await utils.studyMaterials.list.invalidate();
       setFile(null);
       setTitle("");
       setDescription("");
       if (fileInput.current) fileInput.current.value = "";
-      toast.success("PDF saved to Study Materials.");
+      const updated = await utils.studyMaterials.list.fetch();
+      if (updated[0]) await viewMaterial(updated[0].id);
+      toast.success("PDF saved and opened above.");
+      setShowUploadForm(false);
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not upload this PDF."
-      );
-    }
-  };
-
-  const openMaterial = async (id: number) => {
-    const tab = window.open("about:blank", "_blank");
-    try {
-      const result = await downloadMaterial.mutateAsync({ id });
-      if (tab) tab.location.href = result.url;
-      else window.location.assign(result.url);
-    } catch (error) {
-      tab?.close();
-      toast.error(
-        error instanceof Error ? error.message : "Could not open this PDF."
       );
     }
   };
@@ -119,6 +150,10 @@ export function StudyMaterialsLibrary() {
       return;
     try {
       await removeMaterial.mutateAsync({ id });
+      if (selectedId === id) {
+        setSelectedId(null);
+        setPreviewUrl("");
+      }
       await utils.studyMaterials.list.invalidate();
       toast.success("Removed from your library.");
     } catch (error) {
@@ -144,175 +179,240 @@ export function StudyMaterialsLibrary() {
           </span>
           <h1>Study materials</h1>
           <p>
-            Keep your PDFs here. They stay in your library instead of belonging
-            to a specific day.
+            Your saved PDFs stay together here, separate from your daily notes.
           </p>
         </div>
         <span className="materials-count">
           <FolderOpen size={15} /> {materials.length}{" "}
-          {materials.length === 1 ? "file" : "files"}
+          {materials.length === 1 ? "PDF" : "PDFs"}
         </span>
       </header>
 
-      <div className="materials-layout">
-        <section
-          className="panel materials-upload-panel"
-          aria-labelledby="upload-material-heading"
-        >
+      <section className="panel pdf-reader-panel" aria-label="PDF viewer">
+        <div className="pdf-reader-heading">
           <div className="section-title-wrap">
             <span className="section-kicker">
-              <Upload size={13} /> ADD TO YOUR LIBRARY
+              <Eye size={13} /> PDF READER
             </span>
-            <h2 id="upload-material-heading">Upload a PDF</h2>
+            <h2>{selectedMaterial?.title ?? "Your PDF appears here"}</h2>
           </div>
-          <form className="materials-upload-form" onSubmit={submitUpload}>
-            <input
-              ref={fileInput}
-              className="sr-only"
-              type="file"
-              accept="application/pdf,.pdf"
-              aria-label="Choose a PDF study material"
-              onChange={event =>
-                chooseFile(event.currentTarget.files?.[0] ?? null)
-              }
-            />
-            <button
-              type="button"
-              className={`materials-dropzone ${file ? "has-file" : ""}`}
-              onClick={() => fileInput.current?.click()}
-            >
-              {file ? <FileText size={22} /> : <Upload size={22} />}
-              <strong>{file?.name ?? "Choose a study PDF"}</strong>
-              <span>
-                {file
-                  ? `${formatSize(file.size)} · Click to change file`
-                  : "PDF files up to 8 MB"}
-              </span>
-            </button>
-            {fileError && <span className="inline-error">{fileError}</span>}
-            <label className="field-label">
-              Material title
-              <input
-                className="field-control"
-                required
-                maxLength={200}
-                value={title}
-                onChange={event => setTitle(event.target.value)}
-                placeholder="e.g. Biology chapter 4"
-              />
-            </label>
-            <label className="field-label">
-              Description <span className="field-optional">Optional</span>
-              <textarea
-                className="field-control field-textarea materials-description"
-                maxLength={12000}
-                value={description}
-                onChange={event => setDescription(event.target.value)}
-                placeholder="A short reminder about what’s inside…"
-              />
-            </label>
-            <Button
-              type="submit"
-              disabled={
-                !file ||
-                !title.trim() ||
-                uploadMaterial.isPending ||
-                Boolean(fileError)
-              }
-              className="primary-button materials-upload-submit"
-            >
-              <Upload size={15} />{" "}
-              {uploadMaterial.isPending
-                ? "Saving PDF…"
-                : "Save to Study Materials"}
-            </Button>
-          </form>
-          <p className="materials-privacy">
-            Only your signed-in account can see and open these files.
-          </p>
-        </section>
+          {selectedMaterial && (
+            <span className="pdf-reader-filename">
+              {selectedMaterial.fileName}
+            </span>
+          )}
+        </div>
+        {previewUrl ? (
+          <iframe
+            key={previewUrl}
+            className="pdf-reader-frame"
+            title={selectedMaterial?.title ?? "Study material PDF"}
+            src={previewUrl}
+          />
+        ) : (
+          <div className="pdf-reader-empty">
+            <span>
+              <FileText size={25} />
+            </span>
+            <strong>
+              {openingId
+                ? "Opening PDF…"
+                : "Choose a PDF from your library below"}
+            </strong>
+            <p>Your study material opens right here. No extra tab needed.</p>
+          </div>
+        )}
+      </section>
 
-        <section
-          className="panel materials-list-panel"
-          aria-labelledby="saved-materials-heading"
-        >
-          <div className="materials-list-heading">
-            <div className="section-title-wrap">
-              <span className="section-kicker">
-                <FolderOpen size={13} /> YOUR COLLECTION
-              </span>
-              <h2 id="saved-materials-heading">
-                Saved materials{" "}
-                <span className="heading-count">{materials.length}</span>
-              </h2>
-            </div>
+      <section
+        className="panel materials-list-panel materials-library-panel"
+        aria-labelledby="saved-materials-heading"
+      >
+        <div className="materials-list-heading">
+          <div className="section-title-wrap">
+            <span className="section-kicker">
+              <FolderOpen size={13} /> YOUR COLLECTION
+            </span>
+            <h2 id="saved-materials-heading">
+              Your PDFs{" "}
+              <span className="heading-count">{materials.length}</span>
+            </h2>
+          </div>
+          <div className="materials-library-actions">
             <label className="materials-search">
               <Search size={14} />
               <input
                 aria-label="Search study materials"
                 value={search}
                 onChange={event => setSearch(event.target.value)}
-                placeholder="Search files"
+                placeholder="Search PDFs"
               />
             </label>
+            <Button
+              type="button"
+              size="sm"
+              className="primary-button materials-add-button"
+              onClick={() => setShowUploadForm(value => !value)}
+            >
+              {showUploadForm ? <X size={14} /> : <Plus size={14} />}
+              {showUploadForm ? "Close" : "Add PDF"}
+            </Button>
           </div>
-          {materialsQuery.isLoading ? (
-            <div className="loading-list">
-              <span className="loading-dot" />
-              <span className="loading-dot" />
-            </div>
-          ) : filteredMaterials.length ? (
-            <div className="materials-list">
-              {filteredMaterials.map(item => (
-                <article className="material-row" key={item.id}>
-                  <span className="material-file-icon">
-                    <FileText size={18} />
-                  </span>
-                  <div className="material-copy">
-                    <strong>{item.title}</strong>
-                    <span>
-                      {item.fileName} · {formatSize(item.fileSize)}
-                    </span>
-                    {item.description && <p>{item.description}</p>}
-                  </div>
-                  <button
-                    type="button"
-                    className="material-action"
-                    aria-label={`Open ${item.title}`}
-                    title="Open PDF"
-                    onClick={() => void openMaterial(item.id)}
-                  >
-                    <Download size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    className="material-action material-remove"
-                    aria-label={`Remove ${item.title} from library`}
-                    title="Remove from library"
-                    onClick={() => void hideMaterial(item.id, item.title)}
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="materials-empty">
-              <span>
-                <FolderOpen size={20} />
-              </span>
-              <strong>
-                {search ? "No matching materials." : "Your library is ready."}
-              </strong>
-              <p>
-                {search
-                  ? "Try a different title or filename."
-                  : "Upload a PDF and it will stay here for you to reopen whenever you need it."}
+        </div>
+
+        <AnimatePresence initial={false}>
+          {showUploadForm && (
+            <motion.form
+              className="materials-quick-upload"
+              onSubmit={submitUpload}
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+            >
+              <input
+                ref={fileInput}
+                className="sr-only"
+                type="file"
+                accept="application/pdf,.pdf"
+                aria-label="Choose a PDF study material"
+                onChange={event =>
+                  chooseFile(event.currentTarget.files?.[0] ?? null)
+                }
+              />
+              <button
+                type="button"
+                className={`materials-dropzone ${file ? "has-file" : ""}`}
+                onClick={() => fileInput.current?.click()}
+              >
+                {file ? <FileText size={20} /> : <Upload size={20} />}
+                <strong>{file?.name ?? "Choose a study PDF"}</strong>
+                <span>
+                  {file
+                    ? `${formatSize(file.size)} · Click to change`
+                    : "PDF files up to 8 MB"}
+                </span>
+              </button>
+              {fileError && <span className="inline-error">{fileError}</span>}
+              <label className="field-label">
+                Material title
+                <input
+                  className="field-control"
+                  required
+                  maxLength={200}
+                  value={title}
+                  onChange={event => setTitle(event.target.value)}
+                  placeholder="e.g. Biology chapter 4"
+                />
+              </label>
+              <label className="field-label">
+                Description <span className="field-optional">Optional</span>
+                <textarea
+                  className="field-control field-textarea materials-description"
+                  maxLength={12000}
+                  value={description}
+                  onChange={event => setDescription(event.target.value)}
+                  placeholder="A short reminder about what’s inside…"
+                />
+              </label>
+              <Button
+                type="submit"
+                disabled={
+                  !file ||
+                  !title.trim() ||
+                  uploadMaterial.isPending ||
+                  Boolean(fileError)
+                }
+                className="primary-button materials-upload-submit"
+              >
+                <Upload size={15} />
+                {uploadMaterial.isPending ? "Saving PDF…" : "Save and open PDF"}
+              </Button>
+              <p className="materials-privacy">
+                Only your signed-in account can see and open these files.
               </p>
-            </div>
+            </motion.form>
           )}
-        </section>
-      </div>
+        </AnimatePresence>
+
+        {materialsQuery.isLoading ? (
+          <div className="loading-list">
+            <span className="loading-dot" />
+            <span className="loading-dot" />
+          </div>
+        ) : filteredMaterials.length ? (
+          <div className="materials-list">
+            {filteredMaterials.map(item => (
+              <article
+                className={`material-row ${selectedId === item.id ? "material-row-selected" : ""}`}
+                key={item.id}
+              >
+                <span className="material-file-icon">
+                  <FileText size={18} />
+                </span>
+                <div className="material-copy">
+                  <strong>{item.title}</strong>
+                  <span>
+                    {item.fileName} · {formatSize(item.fileSize)}
+                  </span>
+                  {item.description && <p>{item.description}</p>}
+                </div>
+                <button
+                  type="button"
+                  className="material-action material-view-action"
+                  aria-label={`View ${item.title} above`}
+                  title="View PDF above"
+                  onClick={() => void viewMaterial(item.id)}
+                  disabled={openingId === item.id}
+                >
+                  <Eye size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="material-action material-view-action"
+                  aria-label={`Open ${item.title} in a separate tab`}
+                  title="Open PDF in a separate tab"
+                  onClick={() => void downloadMaterialFile(item.id)}
+                >
+                  <Download size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="material-action material-remove"
+                  aria-label={`Remove ${item.title} from library`}
+                  title="Remove from library"
+                  onClick={() => void hideMaterial(item.id, item.title)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="materials-empty">
+            <span>
+              <FolderOpen size={20} />
+            </span>
+            <strong>
+              {search ? "No matching PDFs." : "Your library is ready."}
+            </strong>
+            <p>
+              {search
+                ? "Try another title or filename."
+                : "Add a PDF here, and open it in the reader above whenever you need it."}
+            </p>
+            {!search && (
+              <Button
+                type="button"
+                size="sm"
+                className="primary-button"
+                onClick={() => setShowUploadForm(true)}
+              >
+                <Plus size={14} /> Add your first PDF
+              </Button>
+            )}
+          </div>
+        )}
+      </section>
     </motion.section>
   );
 }

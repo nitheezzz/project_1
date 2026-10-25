@@ -13,6 +13,7 @@ export type TaskDraft = {
   title: string;
   details: string;
   dueDate: string;
+  dueTime: string;
   assignee: string;
   studyContext: string;
   status: "todo" | "in_progress" | "done";
@@ -25,6 +26,7 @@ function makeDraft(task: Task | null | undefined, date: string): TaskDraft {
         title: task.title,
         details: task.details ?? "",
         dueDate: task.dueDate ?? "",
+        dueTime: task.dueTime || "17:00",
         assignee: task.assignee ?? "",
         studyContext: task.studyContext ?? "",
         status: task.status,
@@ -34,6 +36,7 @@ function makeDraft(task: Task | null | undefined, date: string): TaskDraft {
         title: "",
         details: "",
         dueDate: date,
+        dueTime: "17:00",
         assignee: "",
         studyContext: "",
         status: "todo",
@@ -69,7 +72,7 @@ export function TaskDialog({
         <DialogHeader>
           <DialogTitle>{task ? "Edit task" : "Add a task"}</DialogTitle>
           <DialogDescription>
-            Give this next step a name, a date, and a person to own it.
+            Set a date and time deadline, then choose who owns the task.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -102,6 +105,18 @@ export function TaskDialog({
                 onChange={event => change("dueDate", event.target.value)}
               />
             </label>
+            <label className="field-label">
+              Due time (local)
+              <input
+                className="field-control"
+                type="time"
+                required
+                value={draft.dueTime}
+                onChange={event => change("dueTime", event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="form-two-columns">
             <label className="field-label">
               Assign to
               <input
