@@ -41,7 +41,7 @@ const localUserProcedure = publicProcedure.use(({ ctx, next }) => {
   ) {
     throw new TRPCError({
       code: "UNAUTHORIZED",
-      message: "Please sign in to your Daynote account.",
+      message: "Please sign in to your studywithfun account.",
     });
   }
   return next({ ctx: { ...ctx, user: ctx.user } });
@@ -55,7 +55,7 @@ async function startAccountSession(
   user: { openId: string; name: string | null; username: string | null }
 ) {
   const token = await sdk.createSessionToken(user.openId, {
-    name: user.username || user.name || "Daynote user",
+    name: user.username || user.name || "studywithfun user",
     expiresInMs: ONE_YEAR_MS,
   });
   ctx.res.cookie(COOKIE_NAME, token, {
@@ -122,7 +122,7 @@ export const appRouter = router({
     me: publicProcedure.query(({ ctx }) => publicAccount(ctx)),
     logout: publicProcedure.mutation(({ ctx }) => clearAccountCookie(ctx)),
   }),
-  // Keep the starter's auth endpoints available for compatibility; only Daynote
+  // Keep the starter's auth endpoints available for compatibility; only studywithfun
   // username/password accounts are returned as authenticated app users.
   auth: router({
     me: publicProcedure.query(({ ctx }) => publicAccount(ctx)),

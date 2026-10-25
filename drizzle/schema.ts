@@ -10,7 +10,7 @@ import {
   varchar,
 } from "drizzle-orm/mysql-core";
 
-/** User identities. Local Daynote accounts use a synthetic openId and a unique username. */
+/** User identities. Local studywithfun accounts use a synthetic openId and a unique username. */
 export const users = mysqlTable(
   "users",
   {

@@ -144,7 +144,7 @@ function AccountScreen() {
     try {
       if (mode === "register") {
         await registerMutation.mutateAsync({ username, password });
-        toast.success("Your Daynote account is ready.");
+        toast.success("Your studywithfun account is ready.");
       } else {
         await loginMutation.mutateAsync({ username, password });
         toast.success("Welcome back.");
@@ -174,7 +174,7 @@ function AccountScreen() {
       >
         <div className="auth-brand">
           <BrandMark />
-          <span>daynote</span>
+          <span>studywithfun</span>
           <span className="brand-dot">.</span>
         </div>
         <div className="auth-intro">
@@ -233,7 +233,7 @@ function AccountScreen() {
               autoComplete="username"
               value={username}
               onChange={event => setUsername(event.target.value)}
-              placeholder="e.g. studywithsam"
+              placeholder="e.g. studywithnitheesh"
             />
             {mode === "register" && (
               <span className="field-hint">
@@ -290,7 +290,7 @@ function AccountScreen() {
               ? "One moment…"
               : mode === "register"
                 ? "Create my account"
-                : "Sign in to Daynote"}
+                : "Sign in to studywithfun"}
             {!busy && <ArrowRight size={16} />}
           </Button>
         </form>
@@ -779,7 +779,7 @@ function Dashboard() {
         <div className="sidebar-brand">
           <BrandMark />
           <span>
-            daynote<span className="brand-dot">.</span>
+            studywithfun<span className="brand-dot">.</span>
           </span>
           <span className="workspace-label">YOUR SPACE</span>
         </div>
@@ -1262,7 +1262,7 @@ function Dashboard() {
           </div>
           <footer className="page-footer">
             <span>
-              DAYNOTE <span className="brand-dot">·</span> A SMALL SPACE TO
+              STUDYWITHFUN <span className="brand-dot">·</span> A SMALL SPACE TO
               FOCUS
             </span>
             <span>Built for your everyday rhythm.</span>

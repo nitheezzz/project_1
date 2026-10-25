@@ -1,4 +1,4 @@
-# Daynote — ToDo
+# studywithfun — ToDo
 
 - [x] **Daily notes and day navigation** — Create, edit, and delete daily notes for study and general planning. Browse notes and tasks by day through a clear daily view and date navigation.
 - [x] **Assignable task management** — Create tasks with a title, details, and due date, plus optional study-related context. Assign tasks to a person or owner and clearly display responsibility. Track task progress with to do, in progress, and completed states.

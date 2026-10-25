@@ -10,7 +10,7 @@ import {
   verifyPassword,
 } from "./account-security";
 
-describe("Daynote account credentials", () => {
+describe("studywithfun account credentials", () => {
   it("stores a salted scrypt hash and verifies only the matching password", async () => {
     const password = "a-long-study-password-12";
     const encoded = await hashPassword(password);
@@ -24,7 +24,9 @@ describe("Daynote account credentials", () => {
   });
 
   it("normalizes usernames for case-insensitive uniqueness", () => {
-    expect(normalizeUsername("  StudyWithSam  ")).toBe("studywithsam");
+    expect(normalizeUsername("  StudyWithNitheesh  ")).toBe(
+      "studywithnitheesh"
+    );
   });
 
   it("temporarily throttles repeated failed sign-in attempts", () => {
