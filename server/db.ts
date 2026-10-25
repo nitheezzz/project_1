@@ -1,10 +1,25 @@
-import { and, asc, desc, eq, inArray, isNull, like, ne, or } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  like,
+  lt,
+  lte,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   InsertNote,
   InsertStudyMaterial,
   InsertTask,
   InsertUser,
+  EmailVerificationPurpose,
   directMessages,
   friendRequests,
   friendships,
@@ -94,6 +109,166 @@ export async function getUserByUsername(
   return result[0];
 }
 
+export async function getUserByEmail(email: string): Promise<User | undefined> {
+  const db = requireDb(await getDb());
+  const result = await db
+    .select()
+    .from(users)
+    .where(or(eq(users.email, email), eq(users.pendingEmail, email)))
+    .limit(1);
+  return result[0];
+}
+
+export async function updateUserEmailChallenge(
+  userId: number,
+  values: {
+    email?: string | null;
+    pendingEmail?: string | null;
+    emailVerified?: boolean;
+    verificationCode?: string | null;
+    verificationPurpose?: EmailVerificationPurpose | null;
+    verificationExpiresAt?: Date | null;
+    verificationSentAt?: Date | null;
+    verificationAttempts?: number;
+    verificationSendWindowAt?: Date | null;
+    verificationSendCount?: number;
+  }
+) {
+  const db = requireDb(await getDb());
+  await db
+    .update(users)
+    .set({ ...values, updatedAt: new Date() })
+    .where(eq(users.id, userId));
+}
+
+export async function incrementEmailVerificationAttempts(
+  userId: number,
+  purpose: EmailVerificationPurpose,
+  challengeHash: string,
+  maxAttempts: number
+) {
+  const db = requireDb(await getDb());
+  const result = await db
+    .update(users)
+    .set({
+      verificationAttempts: sql`${users.verificationAttempts} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(users.id, userId),
+        eq(users.verificationPurpose, purpose),
+        eq(users.verificationCode, challengeHash),
+        gt(users.verificationExpiresAt, new Date()),
+        lt(users.verificationAttempts, maxAttempts)
+      )
+    );
+  return Number(result[0].affectedRows) === 1;
+}
+
+export async function clearUserEmailChallenge(
+  userId: number,
+  challengeHash?: string
+) {
+  const db = requireDb(await getDb());
+  await db
+    .update(users)
+    .set({
+      pendingEmail: null,
+      verificationCode: null,
+      verificationPurpose: null,
+      verificationExpiresAt: null,
+      verificationSentAt: null,
+      verificationAttempts: 0,
+      updatedAt: new Date(),
+    })
+    .where(
+      challengeHash
+        ? and(eq(users.id, userId), eq(users.verificationCode, challengeHash))
+        : eq(users.id, userId)
+    );
+}
+
+export async function completeUserEmailVerification(
+  userId: number,
+  email: string,
+  purpose: EmailVerificationPurpose,
+  challengeHash: string,
+  maxAttempts: number
+) {
+  const db = requireDb(await getDb());
+  const targetMatches =
+    purpose === "email_change"
+      ? eq(users.pendingEmail, email)
+      : and(eq(users.email, email), eq(users.emailVerified, false));
+  const result = await db
+    .update(users)
+    .set({
+      email,
+      emailVerified: true,
+      pendingEmail: null,
+      verificationCode: null,
+      verificationPurpose: null,
+      verificationExpiresAt: null,
+      verificationSentAt: null,
+      verificationAttempts: 0,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(users.id, userId),
+        eq(users.verificationPurpose, purpose),
+        eq(users.verificationCode, challengeHash),
+        gt(users.verificationExpiresAt, new Date()),
+        lt(users.verificationAttempts, maxAttempts),
+        targetMatches
+      )
+    );
+  return Number(result[0].affectedRows) === 1;
+}
+
+export async function claimEmailVerificationSend(
+  userId: number,
+  now: Date,
+  maxSends: number,
+  windowMs: number
+) {
+  const db = requireDb(await getDb());
+  const windowStart = new Date(now.getTime() - windowMs);
+  const resetWindow =
+    isNull(users.verificationSendWindowAt) ||
+    lte(users.verificationSendWindowAt, windowStart);
+  const result = await db
+    .update(users)
+    .set({
+      verificationSendCount: sql`CASE WHEN ${users.verificationSendWindowAt} IS NULL OR ${users.verificationSendWindowAt} <= ${windowStart} THEN 1 ELSE ${users.verificationSendCount} + 1 END`,
+      verificationSendWindowAt: sql`CASE WHEN ${users.verificationSendWindowAt} IS NULL OR ${users.verificationSendWindowAt} <= ${windowStart} THEN ${now} ELSE ${users.verificationSendWindowAt} END`,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(users.id, userId),
+        or(resetWindow, lt(users.verificationSendCount, maxSends))
+      )
+    );
+  return Number(result[0].affectedRows) === 1;
+}
+
+export async function updateUserLegalConsent(
+  userId: number,
+  legalConsentVersion: string
+) {
+  const db = requireDb(await getDb());
+  await db
+    .update(users)
+    .set({
+      legalConsentAt: new Date(),
+      legalConsentVersion,
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, userId));
+}
+
 export async function updateUserProfile(
   userId: number,
   values: { name: string; bio: string | null; profileColor: string }
@@ -113,12 +288,18 @@ export async function createPasswordUser(values: {
   openId: string;
   username: string;
   passwordHash: string;
+  email: string;
+  legalConsentVersion: string;
 }) {
   const db = requireDb(await getDb());
   await db.insert(users).values({
     openId: values.openId,
     username: values.username,
     passwordHash: values.passwordHash,
+    email: values.email,
+    emailVerified: false,
+    legalConsentAt: new Date(),
+    legalConsentVersion: values.legalConsentVersion,
     name: values.username,
     loginMethod: "password",
     role: "user",

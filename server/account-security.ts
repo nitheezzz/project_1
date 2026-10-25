@@ -1,10 +1,13 @@
 import {
+  createHmac,
   randomBytes,
+  randomInt,
   randomUUID,
   scrypt as scryptCallback,
   timingSafeEqual,
 } from "node:crypto";
 import { TRPCError } from "@trpc/server";
+import { ENV } from "./_core/env";
 import * as db from "./db";
 
 const SCRYPT_N = 16_384;
@@ -16,6 +19,11 @@ const REGISTER_WINDOW_MS = 60 * 60 * 1000;
 const MAX_LOGIN_FAILURES_PER_ACCOUNT_IP = 8;
 const MAX_LOGIN_FAILURES_PER_IP = 40;
 const MAX_REGISTRATIONS_PER_IP = 20;
+export const EMAIL_OTP_SEND_WINDOW_MS = 60 * 60 * 1000;
+export const MAX_EMAIL_OTP_SENDS_PER_ACCOUNT = 5;
+const MAX_EMAIL_OTP_SENDS_PER_IP = 20;
+export const EMAIL_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+export const MAX_EMAIL_OTP_ATTEMPTS = 5;
 const DUMMY_HASH = `scrypt:${SCRYPT_N}:${SCRYPT_R}:${SCRYPT_P}:${"0".repeat(32)}:${"0".repeat(128)}`;
 
 type RateBucket = { count: number; resetsAt: number };
@@ -93,6 +101,70 @@ export function recordRegistrationAttempt(ip: string) {
   incrementBucket(`register-ip:${ip}`, REGISTER_WINDOW_MS);
 }
 
+export function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+export function createEmailVerificationCode() {
+  return randomInt(0, 1_000_000).toString().padStart(6, "0");
+}
+
+export function hashEmailVerificationCode(
+  username: string,
+  email: string,
+  code: string,
+  secret = ENV.cookieSecret
+) {
+  if (!secret) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Email verification is not available right now.",
+    });
+  }
+  return createHmac("sha256", secret)
+    .update(`${normalizeUsername(username)}\0${normalizeEmail(email)}\0${code}`)
+    .digest("hex");
+}
+
+export function matchesEmailVerificationCode(
+  username: string,
+  email: string,
+  code: string,
+  storedHash: string | null,
+  secret = ENV.cookieSecret
+) {
+  if (!storedHash || !/^[a-f0-9]{64}$/.test(storedHash)) return false;
+  const expected = Buffer.from(storedHash, "hex");
+  const actual = Buffer.from(
+    hashEmailVerificationCode(username, email, code, secret),
+    "hex"
+  );
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+export function assertEmailOtpSendAllowed(ip: string, email: string) {
+  assertUnderLimit(
+    `email-otp-address:${normalizeEmail(email)}`,
+    MAX_EMAIL_OTP_SENDS_PER_ACCOUNT,
+    EMAIL_OTP_SEND_WINDOW_MS,
+    "Too many verification emails were requested. Try again later."
+  );
+  assertUnderLimit(
+    `email-otp-ip:${ip}`,
+    MAX_EMAIL_OTP_SENDS_PER_IP,
+    EMAIL_OTP_SEND_WINDOW_MS,
+    "Too many verification emails were requested from this connection. Try again later."
+  );
+}
+
+export function recordEmailOtpSend(ip: string, email: string) {
+  incrementBucket(
+    `email-otp-address:${normalizeEmail(email)}`,
+    EMAIL_OTP_SEND_WINDOW_MS
+  );
+  incrementBucket(`email-otp-ip:${ip}`, EMAIL_OTP_SEND_WINDOW_MS);
+}
+
 function deriveKey(
   password: string,
   salt: string,
@@ -146,13 +218,19 @@ export function normalizeUsername(username: string) {
   return username.trim().toLowerCase();
 }
 
-export async function registerPasswordUser(username: string, password: string) {
+export async function registerPasswordUser(
+  username: string,
+  password: string,
+  email: string,
+  legalConsentVersion: string
+) {
   const normalized = normalizeUsername(username);
   const existing = await db.getUserByUsername(normalized);
-  if (existing) {
+  const existingEmail = await db.getUserByEmail(normalizeEmail(email));
+  if (existing || existingEmail) {
     throw new TRPCError({
       code: "CONFLICT",
-      message: "That username is already taken.",
+      message: "That username or email is already in use.",
     });
   }
   const passwordHash = await hashPassword(password);
@@ -161,6 +239,8 @@ export async function registerPasswordUser(username: string, password: string) {
       openId: `local_${randomUUID()}`,
       username: normalized,
       passwordHash,
+      email: normalizeEmail(email),
+      legalConsentVersion,
     });
     if (!user) throw new Error("New account could not be loaded");
     return user;
@@ -173,7 +253,7 @@ export async function registerPasswordUser(username: string, password: string) {
     ) {
       throw new TRPCError({
         code: "CONFLICT",
-        message: "That username is already taken.",
+        message: "That username or email is already in use.",
       });
     }
     throw error;

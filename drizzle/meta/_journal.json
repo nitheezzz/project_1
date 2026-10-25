@@ -36,6 +36,27 @@
       "when": 1792938267303,
       "tag": "0004_quiet_king_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1792941584474,
+      "tag": "0005_verified_email_otp",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1792941925733,
+      "tag": "0006_legal_consent",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1792942293875,
+      "tag": "0007_otp_send_limits",
+      "breakpoints": true
     }
   ]
 }

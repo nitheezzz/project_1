@@ -1,16 +1,75 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  assertEmailOtpSendAllowed,
   assertLoginAllowed,
   assertRegistrationAllowed,
+  createEmailVerificationCode,
+  hashEmailVerificationCode,
+  matchesEmailVerificationCode,
+  normalizeEmail,
   hashPassword,
   normalizeUsername,
+  recordEmailOtpSend,
   recordLoginFailure,
   recordRegistrationAttempt,
   verifyPassword,
 } from "./account-security";
 
 describe("studywithfun account credentials", () => {
+  it("creates six-digit verification codes and compares their keyed hashes", () => {
+    const code = createEmailVerificationCode();
+    expect(code).toMatch(/^\d{6}$/);
+    const email = normalizeEmail(" Student@Example.COM ");
+    expect(email).toBe("student@example.com");
+    const digest = hashEmailVerificationCode(
+      "StudyWithNitheesh",
+      email,
+      code,
+      "unit-test-secret"
+    );
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      matchesEmailVerificationCode(
+        "studywithnitheesh",
+        email,
+        code,
+        digest,
+        "unit-test-secret"
+      )
+    ).toBe(true);
+    expect(
+      matchesEmailVerificationCode(
+        "studywithnitheesh",
+        email,
+        "000000",
+        digest,
+        "unit-test-secret"
+      )
+    ).toBe(false);
+    expect(
+      matchesEmailVerificationCode(
+        "another-user",
+        email,
+        code,
+        digest,
+        "unit-test-secret"
+      )
+    ).toBe(false);
+  });
+
+  it("limits repeated OTP email sends per address", () => {
+    const email = `student-${randomUUID()}@example.test`;
+    const ip = `otp-${randomUUID()}`;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      assertEmailOtpSendAllowed(ip, email);
+      recordEmailOtpSend(ip, email);
+    }
+    expect(() => assertEmailOtpSendAllowed(ip, email)).toThrow(
+      /Too many verification emails/
+    );
+  });
+
   it("stores a salted scrypt hash and verifies only the matching password", async () => {
     const password = "a-long-study-password-12";
     const encoded = await hashPassword(password);

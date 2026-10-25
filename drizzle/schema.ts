@@ -1,4 +1,5 @@
 import {
+  boolean,
   date,
   index,
   int,
@@ -22,6 +23,21 @@ export const users = mysqlTable(
     bio: varchar("bio", { length: 180 }),
     profileColor: varchar("profileColor", { length: 16 }).default("sage"),
     email: varchar("email", { length: 320 }),
+    emailVerified: boolean("emailVerified").default(false).notNull(),
+    pendingEmail: varchar("pendingEmail", { length: 320 }),
+    verificationCode: varchar("verificationCode", { length: 64 }),
+    verificationPurpose: mysqlEnum("verificationPurpose", [
+      "registration",
+      "existing_account",
+      "email_change",
+    ]),
+    verificationExpiresAt: timestamp("verificationExpiresAt"),
+    verificationSentAt: timestamp("verificationSentAt"),
+    verificationAttempts: int("verificationAttempts").default(0).notNull(),
+    verificationSendWindowAt: timestamp("verificationSendWindowAt"),
+    verificationSendCount: int("verificationSendCount").default(0).notNull(),
+    legalConsentAt: timestamp("legalConsentAt"),
+    legalConsentVersion: varchar("legalConsentVersion", { length: 24 }),
     loginMethod: varchar("loginMethod", { length: 64 }),
     role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -30,8 +46,17 @@ export const users = mysqlTable(
   },
   table => ({
     usernameIdx: uniqueIndex("users_username_unique").on(table.username),
+    emailIdx: uniqueIndex("users_email_unique").on(table.email),
+    pendingEmailIdx: uniqueIndex("users_pending_email_unique").on(
+      table.pendingEmail
+    ),
   })
 );
+
+export type EmailVerificationPurpose =
+  | "registration"
+  | "existing_account"
+  | "email_change";
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;

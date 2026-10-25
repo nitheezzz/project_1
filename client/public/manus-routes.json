@@ -1,6 +1,7 @@
 {
   "routes": [
-    { "path": "/", "title": "studywithfun — Study & Tasks" },
-    { "path": "/404", "title": "Not Found" }
+    { "path": "/", "title": "Home" },
+    { "path": "/privacy", "title": "Privacy Policy" },
+    { "path": "/terms", "title": "Terms & Conditions" }
   ]
 }

@@ -147,31 +147,89 @@ function LoadingScreen() {
 
 function AccountScreen() {
   const [mode, setMode] = useState<"login" | "register">("register");
+  const [step, setStep] = useState<"account" | "verify">("account");
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [verificationEmail, setVerificationEmail] = useState("");
+  const [consentRequired, setConsentRequired] = useState(false);
+  const [legalConsent, setLegalConsent] = useState(false);
   const [error, setError] = useState("");
   const registerMutation = trpc.account.register.useMutation();
   const loginMutation = trpc.account.login.useMutation();
+  const verifyEmailMutation = trpc.account.verifyEmail.useMutation();
   const utils = trpc.useUtils();
-  const busy = registerMutation.isPending || loginMutation.isPending;
+  const busy =
+    registerMutation.isPending ||
+    loginMutation.isPending ||
+    verifyEmailMutation.isPending;
+
+  const openVerificationStep = (maskedEmail: string) => {
+    setVerificationEmail(maskedEmail);
+    setCode("");
+    setStep("verify");
+    setError("");
+    toast.success("Your verification code is on its way.");
+  };
+
+  const finishSignIn = async (message: string) => {
+    setConsentRequired(false);
+    setLegalConsent(false);
+    toast.success(message);
+    await utils.account.me.invalidate();
+  };
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError("");
+    if (step === "verify") {
+      try {
+        await verifyEmailMutation.mutateAsync({ username, code });
+        await finishSignIn("Email verified. Your workspace is ready.");
+      } catch (requestError) {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "That code could not be verified. Please try again."
+        );
+      }
+      return;
+    }
+    if ((mode === "register" || consentRequired) && !legalConsent) {
+      setError("Please agree to the Terms & Conditions and Privacy Policy to continue.");
+      return;
+    }
     if (mode === "register" && password !== confirmPassword) {
       setError("Those passwords don’t match yet.");
       return;
     }
     try {
       if (mode === "register") {
-        await registerMutation.mutateAsync({ username, password });
-        toast.success("Your studywithfun account is ready.");
+        const result = await registerMutation.mutateAsync({
+          username,
+          email,
+          password,
+          legalConsent: true,
+        });
+        if (result.needsVerification) openVerificationStep(result.email);
       } else {
-        await loginMutation.mutateAsync({ username, password });
-        toast.success("Welcome back.");
+        const result = await loginMutation.mutateAsync({
+          username,
+          password,
+          email: email.trim() || undefined,
+          acceptLegalConsent: legalConsent ? true : undefined,
+        });
+        if (result.needsConsent) {
+          setConsentRequired(true);
+          setLegalConsent(false);
+        } else if (result.needsVerification) {
+          openVerificationStep(result.email);
+        } else {
+          await finishSignIn("Welcome back.");
+        }
       }
-      await utils.account.me.invalidate();
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -183,7 +241,40 @@ function AccountScreen() {
 
   const switchMode = (next: "login" | "register") => {
     setMode(next);
+    setStep("account");
+    setCode("");
+    setConsentRequired(false);
+    setLegalConsent(false);
     setError("");
+  };
+
+  const resendCode = async () => {
+    setError("");
+    try {
+      const result = await loginMutation.mutateAsync({
+        username,
+        password,
+        email: email.trim() || undefined,
+        acceptLegalConsent: legalConsent ? true : undefined,
+      });
+      if (result.needsConsent) {
+        setStep("account");
+        setConsentRequired(true);
+        setLegalConsent(false);
+      } else if (result.needsVerification) {
+        setVerificationEmail(result.email);
+        setCode("");
+        toast.success("A verification code was sent.");
+      } else {
+        await finishSignIn("Welcome back.");
+      }
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Could not resend the code. Please try again."
+      );
+    }
   };
 
   return (
@@ -204,7 +295,13 @@ function AccountScreen() {
             <Sparkles size={13} /> YOUR QUIETER CORNER
           </span>
           <h1>
-            {mode === "register" ? (
+            {step === "verify" ? (
+              <>
+                Check your
+                <br />
+                <em>inbox.</em>
+              </>
+            ) : mode === "register" ? (
               <>
                 A little more
                 <br />
@@ -219,11 +316,13 @@ function AccountScreen() {
             )}
           </h1>
           <p>
-            Notes, next steps, and your study soundtrack — all in one calm
-            place.
+            {step === "verify"
+              ? `Enter the 6-digit code sent to ${verificationEmail}. It expires in 10 minutes.`
+              : "Notes, deadlines, and study materials — all in one calm place."}
           </p>
         </div>
-        <div className="auth-tabs" role="tablist" aria-label="Account access">
+        {step === "account" && (
+          <div className="auth-tabs" role="tablist" aria-label="Account access">
           <button
             type="button"
             role="tab"
@@ -242,8 +341,33 @@ function AccountScreen() {
           >
             Sign in
           </button>
-        </div>
+          </div>
+        )}
         <form className="form-stack auth-form" onSubmit={submit}>
+          {step === "account" && (
+            <>
+              <label className="field-label">
+                Email address
+                <input
+                  className="field-control"
+                  required={mode === "register"}
+                  type="email"
+                  maxLength={320}
+                  autoComplete="email"
+                  value={email}
+                  onChange={event => setEmail(event.target.value)}
+                  placeholder={
+                    mode === "register"
+                      ? "you@example.com"
+                      : "Only needed to verify an older account"
+                  }
+                />
+                {mode === "register" && (
+                  <span className="field-hint">
+                    We’ll email a one-time code before opening your workspace.
+                  </span>
+                )}
+              </label>
           <label className="field-label">
             Username
             <input
@@ -297,6 +421,63 @@ function AccountScreen() {
               />
             </label>
           )}
+            </>
+          )}
+          {step === "verify" && (
+            <>
+              <label className="field-label">
+                Verification code
+                <input
+                  className="field-control"
+                  required
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  minLength={6}
+                  maxLength={6}
+                  value={code}
+                  onChange={event =>
+                    setCode(event.target.value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="6-digit code"
+                />
+              </label>
+              <p className="field-hint">
+                Codes can be used once. If you don’t see the email, check spam.
+              </p>
+            </>
+          )}
+          {step === "account" &&
+            (mode === "register" || consentRequired) && (
+              <>
+                {consentRequired && (
+                  <p className="field-hint">
+                    Review and accept the current policies before continuing.
+                  </p>
+                )}
+                <div className="legal-consent">
+                  <input
+                    id="legal-consent"
+                    type="checkbox"
+                    required
+                    checked={legalConsent}
+                    onChange={event => setLegalConsent(event.target.checked)}
+                    aria-labelledby="legal-consent-copy"
+                  />
+                  <span id="legal-consent-copy">
+                    I agree to the{" "}
+                    <a href="/terms" target="_blank" rel="noreferrer">
+                      Terms &amp; Conditions
+                    </a>{" "}
+                    and acknowledge the{" "}
+                    <a href="/privacy" target="_blank" rel="noreferrer">
+                      Privacy Policy
+                    </a>
+                    .
+                  </span>
+                </div>
+              </>
+            )}
           {error && (
             <p className="auth-error" role="alert">
               {error}
@@ -310,15 +491,45 @@ function AccountScreen() {
           >
             {busy
               ? "One moment…"
-              : mode === "register"
-                ? "Create my account"
-                : "Sign in to studywithfun"}
+              : step === "verify"
+                ? "Verify email and continue"
+                : mode === "register"
+                  ? "Create my account"
+                  : "Sign in to studywithfun"}
             {!busy && <ArrowRight size={16} />}
           </Button>
+          {step === "verify" && (
+            <div className="auth-secondary-actions">
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={busy}
+                onClick={resendCode}
+              >
+                Resend code
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setStep("account");
+                  setMode("login");
+                  setCode("");
+                  setError("");
+                }}
+              >
+                Back to sign in
+              </Button>
+            </div>
+          )}
         </form>
         <p className="auth-footnote">
-          <span className="privacy-dot" /> Your notes and tasks are private to
-          your account.
+          <span className="privacy-dot" /> Stored content is not end-to-end encrypted.
+        </p>
+        <p className="auth-legal-links">
+          <a href="/privacy">Privacy Policy</a>
+          <a href="/terms">Terms &amp; Conditions</a>
         </p>
       </motion.section>
       <div className="auth-ambient auth-ambient-one" />

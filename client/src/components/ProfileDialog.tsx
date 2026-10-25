@@ -13,11 +13,13 @@ import { toast } from "sonner";
 type Profile = {
   username: string;
   name: string | null;
+  email: string | null;
+  emailVerified: boolean;
   bio: string | null;
   profileColor: string | null;
 };
 
-type Section = "profile" | "password";
+type Section = "profile" | "email" | "password";
 
 export function ProfileDialog({
   open,
@@ -30,11 +32,17 @@ export function ProfileDialog({
 }) {
   const utils = trpc.useUtils();
   const saveProfile = trpc.account.updateProfile.useMutation();
+  const requestEmailChange = trpc.account.requestEmailChange.useMutation();
+  const verifyEmailChange = trpc.account.verifyEmailChange.useMutation();
   const changePassword = trpc.account.changePassword.useMutation();
   const [section, setSection] = useState<Section>("profile");
   const [name, setName] = useState(user.name ?? user.username);
   const [bio, setBio] = useState(user.bio ?? "");
   const [profileColor, setProfileColor] = useState(user.profileColor ?? "sage");
+  const [newEmail, setNewEmail] = useState("");
+  const [emailCode, setEmailCode] = useState("");
+  const [emailStep, setEmailStep] = useState(false);
+  const [maskedNewEmail, setMaskedNewEmail] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -46,6 +54,10 @@ export function ProfileDialog({
       setName(user.name ?? user.username);
       setBio(user.bio ?? "");
       setProfileColor(user.profileColor ?? "sage");
+      setNewEmail("");
+      setEmailCode("");
+      setEmailStep(false);
+      setMaskedNewEmail("");
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
@@ -101,6 +113,47 @@ export function ProfileDialog({
     }
   };
 
+  const submitEmailChange = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+    try {
+      const result = await requestEmailChange.mutateAsync({
+        email: newEmail,
+        currentPassword,
+      });
+      setMaskedNewEmail(result.email);
+      setEmailStep(true);
+      setEmailCode("");
+      toast.success("A verification code was sent to the new address.");
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Could not send the verification code."
+      );
+    }
+  };
+
+  const submitEmailCode = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+    try {
+      await verifyEmailChange.mutateAsync({ code: emailCode });
+      await utils.account.me.invalidate();
+      setEmailStep(false);
+      setNewEmail("");
+      setEmailCode("");
+      setCurrentPassword("");
+      toast.success("Your email address has been verified and updated.");
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "That code could not be verified."
+      );
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="dialog-panel profile-dialog">
@@ -126,6 +179,18 @@ export function ProfileDialog({
             }}
           >
             Profile
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={section === "email"}
+            className={section === "email" ? "active" : ""}
+            onClick={() => {
+              setSection("email");
+              setError("");
+            }}
+          >
+            Email
           </button>
           <button
             type="button"
@@ -203,6 +268,112 @@ export function ProfileDialog({
               </Button>
             </div>
           </form>
+        ) : section === "email" ? (
+          emailStep ? (
+            <form className="form-stack" onSubmit={submitEmailCode}>
+              <p className="profile-username">
+                Enter the one-time code sent to <strong>{maskedNewEmail}</strong>.
+                The current email stays active until the new one is verified.
+              </p>
+              <label className="field-label">
+                Verification code
+                <input
+                  className="field-control"
+                  required
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  minLength={6}
+                  maxLength={6}
+                  value={emailCode}
+                  onChange={event =>
+                    setEmailCode(event.target.value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="6-digit code"
+                />
+              </label>
+              {error && (
+                <p className="auth-error" role="alert">
+                  {error}
+                </p>
+              )}
+              <div className="dialog-actions">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setEmailStep(false);
+                    setEmailCode("");
+                    setError("");
+                  }}
+                >
+                  Change address
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={verifyEmailChange.isPending}
+                  className="primary-button"
+                >
+                  {verifyEmailChange.isPending ? "Verifying…" : "Verify email"}
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <form className="form-stack" onSubmit={submitEmailChange}>
+              <p className="profile-username">
+                Verified email: <strong>{user.email}</strong>
+              </p>
+              <label className="field-label">
+                New email address
+                <input
+                  className="field-control"
+                  required
+                  type="email"
+                  maxLength={320}
+                  autoComplete="email"
+                  value={newEmail}
+                  onChange={event => setNewEmail(event.target.value)}
+                  placeholder="you@example.com"
+                />
+              </label>
+              <label className="field-label">
+                Current password
+                <input
+                  className="field-control"
+                  required
+                  type="password"
+                  minLength={10}
+                  maxLength={128}
+                  autoComplete="current-password"
+                  value={currentPassword}
+                  onChange={event => setCurrentPassword(event.target.value)}
+                />
+              </label>
+              {error && (
+                <p className="auth-error" role="alert">
+                  {error}
+                </p>
+              )}
+              <div className="dialog-actions">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => onOpenChange(false)}
+                >
+                  Close
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={requestEmailChange.isPending}
+                  className="primary-button"
+                >
+                  {requestEmailChange.isPending
+                    ? "Sending…"
+                    : "Send verification code"}
+                </Button>
+              </div>
+            </form>
+          )
         ) : (
           <form className="form-stack" onSubmit={submitPassword}>
             <label className="field-label">

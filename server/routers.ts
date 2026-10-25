@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
+import { LEGAL_VERSION } from "@shared/legal";
 import { sdk } from "./_core/sdk";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
@@ -10,16 +11,32 @@ import { randomUUID } from "node:crypto";
 import { decodeNotePdfUpload, MAX_NOTE_PDF_BYTES } from "./pdf-attachments";
 import {
   assertLoginAllowed,
+  assertEmailOtpSendAllowed,
   assertRegistrationAllowed,
   authenticatePasswordUser,
   clearLoginFailures,
+  createEmailVerificationCode,
+  EMAIL_OTP_SEND_WINDOW_MS,
+  EMAIL_OTP_RESEND_COOLDOWN_MS,
+  hashEmailVerificationCode,
+  MAX_EMAIL_OTP_SENDS_PER_ACCOUNT,
+  matchesEmailVerificationCode,
+  MAX_EMAIL_OTP_ATTEMPTS,
+  normalizeEmail,
+  normalizeUsername,
   recordLoginFailure,
+  recordEmailOtpSend,
   recordRegistrationAttempt,
   registerPasswordUser,
   hashPassword,
   verifyPassword,
 } from "./account-security";
 import * as db from "./db";
+import {
+  assertEmailDeliveryConfigured,
+  sendVerificationEmail,
+} from "./email";
+import type { EmailVerificationPurpose, User } from "../drizzle/schema";
 
 const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
 const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
@@ -36,6 +53,13 @@ const passwordInput = z
   .string()
   .min(10, "Use a password with at least 10 characters.")
   .max(128, "Passwords can be up to 128 characters.");
+const emailInput = z
+  .string()
+  .trim()
+  .email("Enter a valid email address.")
+  .max(320)
+  .transform(normalizeEmail);
+const verificationCodeInput = z.string().regex(/^\d{6}$/, "Enter the 6-digit code.");
 const nullableShortText = (length: number) =>
   z.string().trim().max(length).nullable().optional();
 const pdfUploadInput = z.object({
@@ -63,7 +87,11 @@ const localUserProcedure = publicProcedure.use(({ ctx, next }) => {
   if (
     !ctx.user?.username ||
     !ctx.user.passwordHash ||
-    ctx.user.loginMethod !== "password"
+    ctx.user.loginMethod !== "password" ||
+    !ctx.user.emailVerified ||
+    !ctx.user.email ||
+    !ctx.user.legalConsentAt ||
+    ctx.user.legalConsentVersion !== LEGAL_VERSION
   ) {
     throw new TRPCError({
       code: "UNAUTHORIZED",
@@ -90,18 +118,198 @@ async function startAccountSession(
   });
 }
 
-function publicAccount(ctx: { user: import("../drizzle/schema").User | null }) {
+function publicAccount(ctx: { user: User | null }) {
   const user = ctx.user;
-  if (!user?.username || !user.passwordHash || user.loginMethod !== "password")
+  if (
+    !user?.username ||
+    !user.passwordHash ||
+    user.loginMethod !== "password" ||
+    !user.emailVerified ||
+    !user.email ||
+    !user.legalConsentAt ||
+    user.legalConsentVersion !== LEGAL_VERSION
+  )
     return null;
   return {
     id: user.id,
     username: user.username,
     name: user.name,
     email: user.email,
+    emailVerified: true,
     bio: user.bio,
     profileColor: user.profileColor,
   };
+}
+
+const EMAIL_OTP_TTL_MS = 10 * 60 * 1000;
+
+function clientIp(ctx: { req: { ip?: string; socket: { remoteAddress?: string } } }) {
+  return ctx.req.ip || ctx.req.socket.remoteAddress || "unknown";
+}
+
+function maskEmail(email: string) {
+  const [local = "", domain = ""] = email.split("@", 2);
+  const visible = local.slice(0, 1);
+  return `${visible}${"•".repeat(Math.min(6, Math.max(2, local.length - 1)))}@${domain}`;
+}
+
+async function assertEmailAvailable(email: string, exceptUserId?: number) {
+  const owner = await db.getUserByEmail(email);
+  if (owner && owner.id !== exceptUserId) {
+    throw new TRPCError({
+      code: "CONFLICT",
+      message: "That email is already linked to another account.",
+    });
+  }
+}
+
+async function issueEmailChallenge(
+  ip: string,
+  user: User,
+  email: string,
+  purpose: EmailVerificationPurpose
+) {
+  assertEmailDeliveryConfigured();
+  const normalizedEmail = normalizeEmail(email);
+  const now = Date.now();
+  const currentTarget =
+    user.verificationPurpose === "email_change"
+      ? user.pendingEmail
+      : user.email;
+  const hasLiveSameCode =
+    Boolean(user.verificationCode) &&
+    Boolean(user.verificationExpiresAt) &&
+    user.verificationExpiresAt!.getTime() > now &&
+    normalizeEmail(currentTarget ?? "") === normalizedEmail;
+  if (
+    hasLiveSameCode &&
+    user.verificationSentAt &&
+    now - user.verificationSentAt.getTime() < EMAIL_OTP_RESEND_COOLDOWN_MS
+  ) {
+    if (user.verificationAttempts >= MAX_EMAIL_OTP_ATTEMPTS) {
+      throw new TRPCError({
+        code: "TOO_MANY_REQUESTS",
+        message: "Too many incorrect codes. Wait before requesting a new one.",
+      });
+    }
+    return maskEmail(normalizedEmail);
+  }
+
+  assertEmailOtpSendAllowed(ip, normalizedEmail);
+  const maySend = await db.claimEmailVerificationSend(
+    user.id,
+    new Date(now),
+    MAX_EMAIL_OTP_SENDS_PER_ACCOUNT,
+    EMAIL_OTP_SEND_WINDOW_MS
+  );
+  if (!maySend) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: "Too many verification emails were requested for this account. Try again later.",
+    });
+  }
+  const code = createEmailVerificationCode();
+  const changes = {
+    ...(purpose === "email_change"
+      ? { pendingEmail: normalizedEmail }
+      : { email: normalizedEmail, pendingEmail: null, emailVerified: false }),
+    verificationCode: hashEmailVerificationCode(
+      user.username ?? "",
+      normalizedEmail,
+      code
+    ),
+    verificationPurpose: purpose,
+    verificationExpiresAt: new Date(now + EMAIL_OTP_TTL_MS),
+    verificationSentAt: new Date(now),
+    verificationAttempts: 0,
+  };
+  await db.updateUserEmailChallenge(user.id, changes);
+  recordEmailOtpSend(ip, normalizedEmail);
+  try {
+    await sendVerificationEmail(normalizedEmail, code);
+  } catch (error) {
+    await db.clearUserEmailChallenge(user.id, changes.verificationCode);
+    throw error;
+  }
+  return maskEmail(normalizedEmail);
+}
+
+async function verifyStoredEmailCode(
+  user: User,
+  email: string,
+  code: string,
+  purpose: EmailVerificationPurpose
+) {
+  if (
+    user.emailVerified && purpose !== "email_change" ||
+    user.verificationPurpose !== purpose ||
+    !user.verificationCode ||
+    !user.verificationExpiresAt
+  ) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That verification code is invalid or has expired.",
+    });
+  }
+  if (user.verificationExpiresAt.getTime() <= Date.now()) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That code has expired. Request a new verification email.",
+    });
+  }
+  if (user.verificationAttempts >= MAX_EMAIL_OTP_ATTEMPTS) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: "Too many incorrect codes. Request a new verification email.",
+    });
+  }
+  if (!user.verificationCode) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That verification code is invalid or has expired.",
+    });
+  }
+  if (
+    !matchesEmailVerificationCode(
+      user.username ?? "",
+      email,
+      code,
+      user.verificationCode
+    )
+  ) {
+    const counted = await db.incrementEmailVerificationAttempts(
+      user.id,
+      purpose,
+      user.verificationCode,
+      MAX_EMAIL_OTP_ATTEMPTS
+    );
+    if (!counted) {
+      const latest = await db.getUserByUsername(user.username ?? "");
+      if (latest && latest.verificationAttempts >= MAX_EMAIL_OTP_ATTEMPTS) {
+        throw new TRPCError({
+          code: "TOO_MANY_REQUESTS",
+          message: "Too many incorrect codes. Request a new verification email.",
+        });
+      }
+    }
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That verification code is not correct.",
+    });
+  }
+  const consumed = await db.completeUserEmailVerification(
+    user.id,
+    normalizeEmail(email),
+    purpose,
+    user.verificationCode,
+    MAX_EMAIL_OTP_ATTEMPTS
+  );
+  if (!consumed) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That verification code is invalid, expired, or already used.",
+    });
+  }
 }
 
 function clearAccountCookie(ctx: {
@@ -119,21 +327,46 @@ export const appRouter = router({
   system: systemRouter,
   account: router({
     register: publicProcedure
-      .input(z.object({ username: usernameInput, password: passwordInput }))
+      .input(
+        z.object({
+          username: usernameInput,
+          password: passwordInput,
+          email: emailInput,
+          legalConsent: z.literal(true),
+        })
+      )
       .mutation(async ({ ctx, input }) => {
-        const ip = ctx.req.ip || ctx.req.socket.remoteAddress || "unknown";
+        const ip = clientIp(ctx);
         assertRegistrationAllowed(ip);
+        assertEmailDeliveryConfigured();
         recordRegistrationAttempt(ip);
-        const user = await registerPasswordUser(input.username, input.password);
-        await startAccountSession(ctx, user);
-        return { success: true } as const;
+        const user = await registerPasswordUser(
+          input.username,
+          input.password,
+          input.email,
+          LEGAL_VERSION
+        );
+        const email = await issueEmailChallenge(
+          ip,
+          user,
+          input.email,
+          "registration"
+        );
+        return { needsVerification: true as const, email };
       }),
     login: publicProcedure
-      .input(z.object({ username: usernameInput, password: passwordInput }))
+      .input(
+        z.object({
+          username: usernameInput,
+          password: passwordInput,
+          email: emailInput.optional(),
+          acceptLegalConsent: z.boolean().optional(),
+        })
+      )
       .mutation(async ({ ctx, input }) => {
-        const ip = ctx.req.ip || ctx.req.socket.remoteAddress || "unknown";
+        const ip = clientIp(ctx);
         assertLoginAllowed(ip, input.username);
-        let user;
+        let user: User;
         try {
           user = await authenticatePasswordUser(input.username, input.password);
         } catch (error) {
@@ -143,8 +376,135 @@ export const appRouter = router({
           throw error;
         }
         clearLoginFailures(ip, input.username);
+        if (
+          !user.legalConsentAt ||
+          user.legalConsentVersion !== LEGAL_VERSION
+        ) {
+          if (!input.acceptLegalConsent) {
+            return { needsConsent: true as const };
+          }
+          await db.updateUserLegalConsent(user.id, LEGAL_VERSION);
+          const consentedUser = await db.getUserByUsername(user.username ?? "");
+          if (!consentedUser) {
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "The accepted account could not be loaded.",
+            });
+          }
+          user = consentedUser;
+        }
+        if (!user.emailVerified) {
+          const email = normalizeEmail(
+            input.email ?? user.pendingEmail ?? user.email ?? ""
+          );
+          if (!email) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "Enter an email address to verify this account.",
+            });
+          }
+          assertEmailDeliveryConfigured();
+          await assertEmailAvailable(email, user.id);
+          const maskedEmail = await issueEmailChallenge(
+            ip,
+            user,
+            email,
+            "existing_account"
+          );
+          return { needsVerification: true as const, email: maskedEmail };
+        }
         await db.upsertUser({ openId: user.openId, lastSignedIn: new Date() });
         await startAccountSession(ctx, user);
+        return { needsVerification: false as const };
+      }),
+    verifyEmail: publicProcedure
+      .input(
+        z.object({ username: usernameInput, code: verificationCodeInput })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const user = await db.getUserByUsername(
+          normalizeUsername(input.username)
+        );
+        if (
+          !user?.username ||
+          user.emailVerified ||
+          !user.email ||
+          !user.verificationPurpose ||
+          user.verificationPurpose === "email_change" ||
+          !user.legalConsentAt ||
+          user.legalConsentVersion !== LEGAL_VERSION
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "That verification code is invalid or has expired.",
+          });
+        }
+        const email = normalizeEmail(user.email);
+        await verifyStoredEmailCode(
+          user,
+          email,
+          input.code,
+          user.verificationPurpose
+        );
+        await db.upsertUser({ openId: user.openId, lastSignedIn: new Date() });
+        const verifiedUser = await db.getUserByUsername(user.username);
+        if (!verifiedUser) {
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: "The verified account could not be loaded.",
+          });
+        }
+        await startAccountSession(ctx, verifiedUser);
+        return { success: true } as const;
+      }),
+    requestEmailChange: localUserProcedure
+      .input(
+        z.object({ currentPassword: passwordInput, email: emailInput })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const ip = clientIp(ctx);
+        const username = ctx.user.username ?? "unknown";
+        assertLoginAllowed(ip, username);
+        if (!(await verifyPassword(input.currentPassword, ctx.user.passwordHash))) {
+          recordLoginFailure(ip, username);
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Your current password isn’t correct.",
+          });
+        }
+        clearLoginFailures(ip, username);
+        if (input.email === ctx.user.email) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "That email is already verified on your account.",
+          });
+        }
+        assertEmailDeliveryConfigured();
+        await assertEmailAvailable(input.email, ctx.user.id);
+        const email = await issueEmailChallenge(
+          ip,
+          ctx.user,
+          input.email,
+          "email_change"
+        );
+        return { success: true, email } as const;
+      }),
+    verifyEmailChange: localUserProcedure
+      .input(z.object({ code: verificationCodeInput }))
+      .mutation(async ({ ctx, input }) => {
+        const email = ctx.user.pendingEmail;
+        if (!email) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "There is no pending email change to verify.",
+          });
+        }
+        await verifyStoredEmailCode(
+          ctx.user,
+          email,
+          input.code,
+          "email_change"
+        );
         return { success: true } as const;
       }),
     updateProfile: localUserProcedure
