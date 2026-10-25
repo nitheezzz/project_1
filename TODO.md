@@ -27,7 +27,7 @@
 - `pnpm check` passes; `pnpm test` passes all 18 tests; `pnpm build` succeeds; `git diff --check` is clean. Build reports the existing platform-config script/bundle-size warnings.
 - Local HTTP checks returned 200 for `/api/health`, `/privacy`, `/terms`, and `/manus-routes.json`; the served manifest declares exactly `/`, `/privacy`, and `/terms`.
 - OTP attempt increments and one-time consumption use conditional database updates; per-account send limits persist. Additional IP/login/registration throttles remain process-local and may reset on restart.
-- No Resend API key or verified sender is configured, so real email delivery and production sign-up/login remain unverified. No email was sent and no version was published.
+- No Resend API key or verified sender is configured, so real email delivery and production sign-up/login remain unverified. No email was sent and no website publication was run.
 - Legal pages disclose that the app is not end-to-end encrypted and accurately describe current retention/deletion limits. The operator's legal identity, privacy contact, and jurisdiction are still missing, so the pages are not ready for public production use.
 - Friends messaging reads and sends are server-authorized only for accepted friendships; Study Materials PDF opening checks the owner's library record before issuing signed URLs.
 - Browser reminders require the site to remain open and poll deadlines; system notifications also require browser permission. Unfinished overdue tasks may alert after reopening.
