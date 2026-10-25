@@ -43,21 +43,17 @@ const pdfUploadInput = z.object({
     .max(Math.ceil((MAX_NOTE_PDF_BYTES * 4) / 3) + 8),
 });
 
-async function storeNotePdf(
+async function storeStudyMaterialPdf(
   userId: number,
   input: z.infer<typeof pdfUploadInput>
 ) {
   const { data, fileName } = decodeNotePdfUpload(input);
   const stored = await storagePut(
-    `studywithfun/users/${userId}/notes/${randomUUID()}.pdf`,
+    `studywithfun/users/${userId}/study-materials/${randomUUID()}.pdf`,
     data,
     "application/pdf"
   );
-  return {
-    pdfStorageKey: stored.key,
-    pdfFileName: fileName,
-    pdfFileSize: data.length,
-  };
+  return { fileName, fileSize: data.length, storageKey: stored.key };
 }
 
 const localUserProcedure = publicProcedure.use(({ ctx, next }) => {
@@ -171,13 +167,9 @@ export const appRouter = router({
           title: z.string().trim().min(1).max(240),
           body: z.string().max(12000).nullable().optional(),
           category: noteCategory,
-          pdf: pdfUploadInput.optional(),
         })
       )
-      .mutation(async ({ ctx, input: { pdf, ...values } }) => {
-        const attachment = pdf ? await storeNotePdf(ctx.user.id, pdf) : {};
-        return db.createNote(ctx.user.id, { ...values, ...attachment });
-      }),
+      .mutation(({ ctx, input }) => db.createNote(ctx.user.id, input)),
     update: localUserProcedure
       .input(
         z.object({
@@ -186,28 +178,56 @@ export const appRouter = router({
           title: z.string().trim().min(1).max(240).optional(),
           body: z.string().max(12000).nullable().optional(),
           category: noteCategory.optional(),
-          pdf: pdfUploadInput.optional(),
         })
       )
-      .mutation(async ({ ctx, input: { id, pdf, ...values } }) => {
-        const attachment = pdf ? await storeNotePdf(ctx.user.id, pdf) : {};
-        return db.updateNote(ctx.user.id, id, { ...values, ...attachment });
-      }),
+      .mutation(({ ctx, input: { id, ...values } }) =>
+        db.updateNote(ctx.user.id, id, values)
+      ),
     delete: localUserProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(({ ctx, input }) => db.deleteNote(ctx.user.id, input.id)),
-    pdfDownloadUrl: localUserProcedure
+  }),
+  studyMaterials: router({
+    list: localUserProcedure.query(({ ctx }) =>
+      db.listStudyMaterials(ctx.user.id)
+    ),
+    upload: localUserProcedure
+      .input(
+        z.object({
+          title: z.string().trim().min(1).max(200),
+          description: z.string().trim().max(12000).nullable().optional(),
+          fileName: pdfUploadInput.shape.fileName,
+          contentBase64: pdfUploadInput.shape.contentBase64,
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const uploaded = await storeStudyMaterialPdf(ctx.user.id, {
+          fileName: input.fileName,
+          contentBase64: input.contentBase64,
+        });
+        return db.createStudyMaterial(ctx.user.id, {
+          title: input.title,
+          description: input.description || null,
+          ...uploaded,
+        });
+      }),
+    downloadUrl: localUserProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
-        const attachment = await db.getNoteAttachment(ctx.user.id, input.id);
-        if (!attachment?.pdfStorageKey) {
+        const material = await db.getStudyMaterial(ctx.user.id, input.id);
+        if (!material?.storageKey) {
           throw new TRPCError({
             code: "NOT_FOUND",
-            message: "PDF attachment not found.",
+            message: "Study material not found.",
           });
         }
-        return { url: await storageGetSignedUrl(attachment.pdfStorageKey) };
+        return { url: await storageGetSignedUrl(material.storageKey) };
       }),
+    remove: localUserProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(({ ctx, input }) =>
+        db.removeStudyMaterial(ctx.user.id, input.id)
+      ),
   }),
   tasks: router({
     list: localUserProcedure
@@ -252,16 +272,6 @@ export const appRouter = router({
     delete: localUserProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(({ ctx, input }) => db.deleteTask(ctx.user.id, input.id)),
-  }),
-  preferences: router({
-    spotifyLink: localUserProcedure.query(({ ctx }) =>
-      db.getSpotifyLink(ctx.user.id)
-    ),
-    saveSpotifyLink: localUserProcedure
-      .input(z.object({ spotifyLink: z.string().trim().max(2048).nullable() }))
-      .mutation(({ ctx, input }) =>
-        db.saveSpotifyLink(ctx.user.id, input.spotifyLink)
-      ),
   }),
 });
 

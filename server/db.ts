@@ -1,13 +1,14 @@
-import { and, asc, desc, eq, like, or } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, like, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   InsertNote,
+  InsertStudyMaterial,
   InsertTask,
   InsertUser,
   notes,
+  studyMaterials,
   tasks,
   User,
-  userPreferences,
   users,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
@@ -136,17 +137,62 @@ export async function createNote(
   return { success: true } as const;
 }
 
-export async function getNoteAttachment(userId: number, id: number) {
+export async function listStudyMaterials(userId: number) {
   const db = requireDb(await getDb());
-  const [note] = await db
+  return db
+    .select()
+    .from(studyMaterials)
+    .where(
+      and(eq(studyMaterials.userId, userId), isNull(studyMaterials.deletedAt))
+    )
+    .orderBy(desc(studyMaterials.createdAt))
+    .limit(200);
+}
+
+export async function createStudyMaterial(
+  userId: number,
+  values: Pick<
+    InsertStudyMaterial,
+    "title" | "description" | "fileName" | "storageKey" | "fileSize"
+  >
+) {
+  const db = requireDb(await getDb());
+  await db.insert(studyMaterials).values({ ...values, userId });
+  return { success: true } as const;
+}
+
+export async function getStudyMaterial(userId: number, id: number) {
+  const db = requireDb(await getDb());
+  const [material] = await db
     .select({
-      pdfStorageKey: notes.pdfStorageKey,
-      pdfFileName: notes.pdfFileName,
+      storageKey: studyMaterials.storageKey,
+      fileName: studyMaterials.fileName,
     })
-    .from(notes)
-    .where(and(eq(notes.id, id), eq(notes.userId, userId)))
+    .from(studyMaterials)
+    .where(
+      and(
+        eq(studyMaterials.id, id),
+        eq(studyMaterials.userId, userId),
+        isNull(studyMaterials.deletedAt)
+      )
+    )
     .limit(1);
-  return note ?? null;
+  return material ?? null;
+}
+
+export async function removeStudyMaterial(userId: number, id: number) {
+  const db = requireDb(await getDb());
+  await db
+    .update(studyMaterials)
+    .set({ deletedAt: new Date() })
+    .where(
+      and(
+        eq(studyMaterials.id, id),
+        eq(studyMaterials.userId, userId),
+        isNull(studyMaterials.deletedAt)
+      )
+    );
+  return { success: true } as const;
 }
 
 export async function updateNote(
@@ -226,27 +272,5 @@ export async function updateTask(
 export async function deleteTask(userId: number, id: number) {
   const db = requireDb(await getDb());
   await db.delete(tasks).where(and(eq(tasks.id, id), eq(tasks.userId, userId)));
-  return { success: true } as const;
-}
-
-export async function getSpotifyLink(userId: number) {
-  const db = requireDb(await getDb());
-  const result = await db
-    .select({ spotifyLink: userPreferences.spotifyLink })
-    .from(userPreferences)
-    .where(eq(userPreferences.userId, userId))
-    .limit(1);
-  return result[0]?.spotifyLink ?? null;
-}
-
-export async function saveSpotifyLink(
-  userId: number,
-  spotifyLink: string | null
-) {
-  const db = requireDb(await getDb());
-  await db
-    .insert(userPreferences)
-    .values({ userId, spotifyLink })
-    .onDuplicateKeyUpdate({ set: { spotifyLink } });
   return { success: true } as const;
 }

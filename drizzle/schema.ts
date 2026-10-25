@@ -61,6 +61,32 @@ export const notes = mysqlTable(
 export type Note = typeof notes.$inferSelect;
 export type InsertNote = typeof notes.$inferInsert;
 
+export const studyMaterials = mysqlTable(
+  "study_materials",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: varchar("title", { length: 200 }).notNull(),
+    description: text("description"),
+    fileName: varchar("fileName", { length: 255 }).notNull(),
+    storageKey: varchar("storageKey", { length: 512 }).notNull(),
+    fileSize: int("fileSize").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    deletedAt: timestamp("deletedAt"),
+  },
+  table => ({
+    userCreatedIdx: index("study_materials_user_created_idx").on(
+      table.userId,
+      table.createdAt
+    ),
+  })
+);
+
+export type StudyMaterial = typeof studyMaterials.$inferSelect;
+export type InsertStudyMaterial = typeof studyMaterials.$inferInsert;
+
 export const tasks = mysqlTable(
   "tasks",
   {

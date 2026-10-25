@@ -7,15 +7,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { Note } from "../../../drizzle/schema";
-import { FileText, Upload, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 export type NoteDraft = {
   date: string;
   title: string;
   body: string;
   category: "study" | "planning" | "reflection";
-  pdfFile: File | null;
 };
 
 function makeDraft(note: Note | null | undefined, date: string): NoteDraft {
@@ -25,9 +23,8 @@ function makeDraft(note: Note | null | undefined, date: string): NoteDraft {
         title: note.title,
         body: note.body ?? "",
         category: note.category,
-        pdfFile: null,
       }
-    : { date, title: "", body: "", category: "study", pdfFile: null };
+    : { date, title: "", body: "", category: "study" };
 }
 
 export function NoteDialog({
@@ -46,13 +43,8 @@ export function NoteDialog({
   onSave: (draft: NoteDraft) => void;
 }) {
   const [draft, setDraft] = useState(() => makeDraft(note, date));
-  const [fileError, setFileError] = useState("");
-  const fileInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    if (open) {
-      setDraft(makeDraft(note, date));
-      setFileError("");
-    }
+    if (open) setDraft(makeDraft(note, date));
   }, [open, note, date]);
   const change = <K extends keyof NoteDraft>(key: K, value: NoteDraft[K]) =>
     setDraft(previous => ({ ...previous, [key]: value }));
@@ -63,8 +55,7 @@ export function NoteDialog({
         <DialogHeader>
           <DialogTitle>{note ? "Edit note" : "New daily note"}</DialogTitle>
           <DialogDescription>
-            Keep a study thought, a plan, a reflection, or attach a PDF for this
-            day.
+            Keep a study thought, a plan, or a small reflection for this day.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -125,86 +116,6 @@ export function NoteDialog({
               onChange={event => change("body", event.target.value)}
             />
           </label>
-          <div className="field-label">
-            <span>
-              PDF study material{" "}
-              <span className="field-optional">Optional · up to 8 MB</span>
-            </span>
-            <input
-              ref={fileInput}
-              className="sr-only"
-              type="file"
-              accept="application/pdf,.pdf"
-              aria-label="Attach a PDF study material"
-              onChange={event => {
-                const file = event.currentTarget.files?.[0] ?? null;
-                setFileError("");
-                if (!file) return;
-                if (
-                  !file.name.toLowerCase().endsWith(".pdf") ||
-                  (file.type && file.type !== "application/pdf")
-                ) {
-                  setFileError("Choose a PDF file.");
-                  event.currentTarget.value = "";
-                  return;
-                }
-                if (file.size > 8 * 1024 * 1024) {
-                  setFileError("PDFs must be 8 MB or smaller.");
-                  event.currentTarget.value = "";
-                  return;
-                }
-                change("pdfFile", file);
-              }}
-            />
-            {draft.pdfFile ? (
-              <span className="pdf-selected-file">
-                <FileText size={15} />
-                <span>{draft.pdfFile.name}</span>
-                <button
-                  type="button"
-                  aria-label="Remove selected PDF"
-                  onClick={() => {
-                    change("pdfFile", null);
-                    if (fileInput.current) fileInput.current.value = "";
-                  }}
-                >
-                  <X size={14} />
-                </button>
-              </span>
-            ) : note?.pdfFileName ? (
-              <>
-                <span className="pdf-selected-file">
-                  <FileText size={15} />
-                  <span>Current file: {note.pdfFileName}</span>
-                </span>
-                <button
-                  type="button"
-                  className="pdf-replace-button"
-                  onClick={() => fileInput.current?.click()}
-                >
-                  Replace PDF
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="pdf-picker-button"
-                onClick={() => fileInput.current?.click()}
-              >
-                <Upload size={15} /> Choose a PDF
-              </button>
-            )}
-            {draft.pdfFile && (
-              <button
-                type="button"
-                className="pdf-replace-button"
-                onClick={() => fileInput.current?.click()}
-              >
-                Choose a different PDF
-              </button>
-            )}
-            {fileError && <span className="inline-error">{fileError}</span>}
-          </div>
           <div className="dialog-actions">
             <Button
               type="button"
@@ -215,7 +126,7 @@ export function NoteDialog({
             </Button>
             <Button
               type="submit"
-              disabled={saving || !draft.title.trim() || Boolean(fileError)}
+              disabled={saving || !draft.title.trim()}
               className="primary-button"
             >
               {saving ? "Saving…" : "Save note"}

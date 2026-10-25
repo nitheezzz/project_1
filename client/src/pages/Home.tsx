@@ -2,7 +2,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { NoteDialog, type NoteDraft } from "@/components/NoteDialog";
 import { TaskDialog, type TaskDraft } from "@/components/TaskDialog";
 import { Button } from "@/components/ui/button";
-import { spotifyEmbedUrl } from "@/lib/spotify";
+import { StudyMaterialsLibrary } from "@/components/StudyMaterialsLibrary";
 import { trpc } from "@/lib/trpc";
 import type { Note, Task } from "../../../drizzle/schema";
 import { AnimatePresence, motion } from "framer-motion";
@@ -21,10 +21,9 @@ import {
   Circle,
   Clock3,
   ExternalLink,
-  FileText,
+  FolderOpen,
   ListTodo,
   LogOut,
-  Music2,
   NotebookPen,
   PanelTop,
   Plus,
@@ -45,13 +44,14 @@ const pageMotion = {
   transition: { duration: 0.28, ease: "easeOut" as const },
 };
 
-type View = "today" | "tasks" | "notes";
+type View = "today" | "tasks" | "notes" | "materials";
 type TaskStatus = "todo" | "in_progress" | "done";
 
 const navItems: { id: View; label: string; icon: typeof CalendarDays }[] = [
   { id: "today", label: "Today", icon: CalendarDays },
   { id: "tasks", label: "My tasks", icon: ListTodo },
   { id: "notes", label: "Study notes", icon: NotebookPen },
+  { id: "materials", label: "Study materials", icon: FolderOpen },
 ];
 
 function todayKey() {
@@ -85,18 +85,6 @@ function formatShortDate(value: string | null) {
     month: "short",
     day: "numeric",
   }).format(dateFromKey(value));
-}
-
-async function fileToBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(
-      ...bytes.subarray(offset, offset + chunkSize)
-    );
-  }
-  return btoa(binary);
 }
 
 function statusLabel(status: TaskStatus) {
@@ -400,12 +388,10 @@ function NoteCard({
   note,
   onEdit,
   onDelete,
-  onDownloadPdf,
 }: {
   note: Note;
   onEdit: (note: Note) => void;
   onDelete: (note: Note) => void;
-  onDownloadPdf: (note: Note) => void;
 }) {
   const typeLabels = {
     study: "Study note",
@@ -433,26 +419,11 @@ function NoteCard({
         <span className="note-body">
           {note.body || "A blank page is a place to begin."}
         </span>
-        {note.pdfFileName && (
-          <span className="note-pdf-chip">
-            <FileText size={13} /> <span>{note.pdfFileName}</span>
-          </span>
-        )}
         <span className="note-date">
           {formatDay(note.date, { month: "short", day: "numeric" })}{" "}
           <ArrowUpRight size={13} />
         </span>
       </button>
-      {note.pdfStorageKey && (
-        <button
-          type="button"
-          className="note-pdf-download"
-          aria-label={`Download ${note.pdfFileName ?? "PDF attachment"}`}
-          onClick={() => onDownloadPdf(note)}
-        >
-          <FileText size={13} /> PDF
-        </button>
-      )}
       <button
         type="button"
         className="icon-action note-delete"
@@ -462,165 +433,6 @@ function NoteCard({
         <Trash2 size={14} />
       </button>
     </motion.article>
-  );
-}
-
-function SpotifyCard({ userId }: { userId: number }) {
-  const preferencesQuery = trpc.preferences.spotifyLink.useQuery(undefined);
-  const saveLink = trpc.preferences.saveSpotifyLink.useMutation();
-  const [link, setLink] = useState("");
-  const [editing, setEditing] = useState(false);
-  const [error, setError] = useState("");
-  const utils = trpc.useUtils();
-  useEffect(() => {
-    if (preferencesQuery.data !== undefined)
-      setLink(preferencesQuery.data ?? "");
-  }, [preferencesQuery.data]);
-  const savedLink = preferencesQuery.data ?? null;
-  const embedUrl = spotifyEmbedUrl(savedLink);
-
-  const save = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError("");
-    if (link && !spotifyEmbedUrl(link)) {
-      setError("Paste a Spotify track, album, or playlist link.");
-      return;
-    }
-    try {
-      await saveLink.mutateAsync({ spotifyLink: link.trim() || null });
-      await utils.preferences.spotifyLink.invalidate();
-      setEditing(false);
-      toast.success(
-        link.trim() ? "Focus music saved." : "Spotify link removed."
-      );
-    } catch (saveError) {
-      setError(
-        saveError instanceof Error
-          ? saveError.message
-          : "Could not save this link."
-      );
-    }
-  };
-
-  return (
-    <section className="panel spotify-panel" aria-labelledby="spotify-heading">
-      <div className="panel-heading spotify-heading-row">
-        <div className="section-title-wrap">
-          <span className="section-kicker">
-            <Music2 size={13} /> FOCUS SOUNDTRACK
-          </span>
-          <h2 id="spotify-heading">Study with music</h2>
-        </div>
-        <span className="spotify-mark" aria-label="Spotify">
-          <Music2 size={15} />
-        </span>
-      </div>
-      {embedUrl ? (
-        <div className="spotify-player-wrap">
-          <iframe
-            key={`${userId}-${savedLink}`}
-            title="Spotify focus music player"
-            src={embedUrl}
-            width="100%"
-            height="352"
-            loading="lazy"
-            allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
-            referrerPolicy="strict-origin-when-cross-origin"
-          />
-          <div className="spotify-player-actions">
-            <button
-              type="button"
-              className="text-action"
-              onClick={() => setEditing(value => !value)}
-            >
-              {editing ? "Close settings" : "Change music"}
-            </button>
-            <a
-              className="text-action"
-              href={savedLink ?? "https://open.spotify.com/"}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open Spotify <ExternalLink size={12} />
-            </a>
-          </div>
-          {editing && (
-            <form className="spotify-edit-form" onSubmit={save}>
-              <input
-                className="field-control"
-                aria-label="Spotify music link"
-                value={link}
-                onChange={event => setLink(event.target.value)}
-                placeholder="Paste a playlist or track link"
-              />
-              {error && <span className="inline-error">{error}</span>}
-              <div className="spotify-form-actions">
-                <button
-                  className="text-action"
-                  type="button"
-                  onClick={() => {
-                    setLink("");
-                    void saveLink
-                      .mutateAsync({ spotifyLink: null })
-                      .then(() => utils.preferences.spotifyLink.invalidate());
-                  }}
-                >
-                  Remove
-                </button>
-                <Button
-                  type="submit"
-                  size="sm"
-                  disabled={saveLink.isPending}
-                  className="primary-button"
-                >
-                  Save link
-                </Button>
-              </div>
-            </form>
-          )}
-        </div>
-      ) : (
-        <div className="spotify-empty">
-          <div className="spotify-empty-icon">
-            <Music2 size={19} />
-          </div>
-          <p>Set a sound for your next study session.</p>
-          <span>
-            Paste a Spotify track, album, or playlist link and it’ll be ready
-            here when you return.
-          </span>
-          <form className="spotify-setup-form" onSubmit={save}>
-            <input
-              className="field-control"
-              aria-label="Spotify music link"
-              value={link}
-              onChange={event => setLink(event.target.value)}
-              placeholder="open.spotify.com/playlist/…"
-            />
-            {error && <span className="inline-error">{error}</span>}
-            <Button
-              type="submit"
-              disabled={saveLink.isPending || !link.trim()}
-              className="primary-button spotify-save-button"
-            >
-              Save &amp; play <ArrowRight size={14} />
-            </Button>
-          </form>
-          <a
-            className="spotify-connect-link"
-            href="https://open.spotify.com/"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Connect to Spotify <ExternalLink size={12} />
-          </a>
-        </div>
-      )}
-      <p className="spotify-caption">
-        Powered by Spotify’s embedded player. Sign in to Spotify for playback
-        from your account.
-      </p>
-    </section>
   );
 }
 
@@ -654,7 +466,6 @@ function Dashboard() {
   const createNote = trpc.notes.create.useMutation();
   const updateNote = trpc.notes.update.useMutation();
   const deleteNote = trpc.notes.delete.useMutation();
-  const pdfDownloadUrl = trpc.notes.pdfDownloadUrl.useMutation();
   const tasks = tasksQuery.data ?? [];
   const allTasks = allTasksQuery.data ?? [];
   const notes = notesQuery.data ?? [];
@@ -717,12 +528,6 @@ function Dashboard() {
         title: draft.title.trim(),
         body: draft.body.trim() || null,
         category: draft.category,
-        pdf: draft.pdfFile
-          ? {
-              fileName: draft.pdfFile.name,
-              contentBase64: await fileToBase64(draft.pdfFile),
-            }
-          : undefined,
       };
       if (editingNote)
         await updateNote.mutateAsync({ id: editingNote.id, ...values });
@@ -787,20 +592,6 @@ function Dashboard() {
     }
   };
 
-  const downloadNotePdf = async (note: Note) => {
-    const tab = window.open("about:blank", "_blank");
-    try {
-      const result = await pdfDownloadUrl.mutateAsync({ id: note.id });
-      if (tab) tab.location.href = result.url;
-      else window.location.assign(result.url);
-    } catch (error) {
-      tab?.close();
-      toast.error(
-        error instanceof Error ? error.message : "Could not open this PDF."
-      );
-    }
-  };
-
   const openTask = (task: Task | null = null) => {
     setEditingTask(task);
     setTaskDialogOpen(true);
@@ -821,8 +612,8 @@ function Dashboard() {
   };
 
   if (!user) return null;
-  const showTasks = view !== "notes";
-  const showNotes = view !== "tasks";
+  const showTasks = view === "today" || view === "tasks";
+  const showNotes = view === "today" || view === "notes";
 
   return (
     <motion.div className="app-frame" {...pageMotion}>
@@ -903,29 +694,34 @@ function Dashboard() {
             <ChevronRight size={14} />
             <strong>{navItems.find(item => item.id === view)?.label}</strong>
           </div>
-          <div className="topbar-actions">
-            <label className="search-box">
-              <Search size={16} />
-              <input
-                aria-label="Search tasks and notes"
-                placeholder="Search your day…"
-                value={search}
-                onChange={event => setSearch(event.target.value)}
-              />
-              <kbd>/</kbd>
-            </label>
-            <Button
-              size="sm"
-              className="primary-button top-add-button"
-              onClick={() => openTask()}
-            >
-              <Plus size={16} /> <span>New task</span>
-            </Button>
-          </div>
+          {view !== "materials" && (
+            <div className="topbar-actions">
+              <label className="search-box">
+                <Search size={16} />
+                <input
+                  aria-label="Search tasks and notes"
+                  placeholder="Search your day…"
+                  value={search}
+                  onChange={event => setSearch(event.target.value)}
+                />
+                <kbd>/</kbd>
+              </label>
+              <Button
+                size="sm"
+                className="primary-button top-add-button"
+                onClick={() => openTask()}
+              >
+                <Plus size={16} /> <span>New task</span>
+              </Button>
+            </div>
+          )}
         </header>
 
         <div className="page-content">
-          <section className="day-toolbar">
+          {view === "materials" && <StudyMaterialsLibrary />}
+          <section
+            className={`day-toolbar ${view === "materials" ? "view-hidden" : ""}`}
+          >
             <div>
               <span className="eyebrow">
                 <span className="live-dot" />{" "}
@@ -1063,7 +859,9 @@ function Dashboard() {
             </motion.section>
           )}
 
-          <div className="dashboard-grid">
+          <div
+            className={`dashboard-grid ${view === "materials" ? "view-hidden" : ""}`}
+          >
             <div className="primary-column">
               {showTasks && (
                 <section
@@ -1240,7 +1038,6 @@ function Dashboard() {
                             note={note}
                             onEdit={openNote}
                             onDelete={removeNote}
-                            onDownloadPdf={downloadNotePdf}
                           />
                         ))}
                       </AnimatePresence>
@@ -1282,7 +1079,6 @@ function Dashboard() {
             </div>
 
             <aside className="secondary-column">
-              <SpotifyCard userId={user.id} />
               <section className="small-note-card">
                 <div className="small-note-top">
                   <span className="small-note-icon">
@@ -1306,8 +1102,7 @@ function Dashboard() {
                   <span>PRIVATE BY DESIGN</span>
                 </div>
                 <p>
-                  Your notes, tasks, and saved music link belong to your
-                  account.
+                  Your notes, tasks, and study materials belong to your account.
                 </p>
               </div>
             </aside>
