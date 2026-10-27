@@ -5,7 +5,11 @@ import {
   assertLoginAllowed,
   assertRegistrationAllowed,
   createEmailVerificationCode,
+  createAccountChallengeCodeHash,
+  createAccountContinuationToken,
   hashEmailVerificationCode,
+  hashAccountContinuationToken,
+  matchesAccountChallengeCode,
   matchesEmailVerificationCode,
   normalizeEmail,
   hashPassword,
@@ -68,6 +72,75 @@ describe("studywithfun account credentials", () => {
     expect(() => assertEmailOtpSendAllowed(ip, email)).toThrow(
       /Too many verification emails/
     );
+  });
+
+  it("binds staged signup and recovery codes to their purpose and challenge", () => {
+    const code = createEmailVerificationCode();
+    const challengeId = randomUUID();
+    const email = "student@example.test";
+    const username = "student_1";
+    const hash = createAccountChallengeCodeHash(
+      "signup",
+      challengeId,
+      username,
+      email,
+      code,
+      "unit-test-secret"
+    );
+    expect(
+      matchesAccountChallengeCode(
+        "signup",
+        challengeId,
+        username,
+        email,
+        code,
+        hash,
+        "unit-test-secret"
+      )
+    ).toBe(true);
+    expect(
+      matchesAccountChallengeCode(
+        "password_reset",
+        challengeId,
+        username,
+        email,
+        code,
+        hash,
+        "unit-test-secret"
+      )
+    ).toBe(false);
+    expect(
+      matchesAccountChallengeCode(
+        "signup",
+        randomUUID(),
+        username,
+        email,
+        code,
+        hash,
+        "unit-test-secret"
+      )
+    ).toBe(false);
+  });
+
+  it("hashes one-use continuation tokens without persisting the token itself", () => {
+    const token = createAccountContinuationToken();
+    const challengeId = randomUUID();
+    const digest = hashAccountContinuationToken(
+      "password_reset",
+      challengeId,
+      token,
+      "unit-test-secret"
+    );
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(digest).not.toBe(token);
+    expect(
+      hashAccountContinuationToken(
+        "password_reset",
+        randomUUID(),
+        token,
+        "unit-test-secret"
+      )
+    ).not.toBe(digest);
   });
 
   it("stores a salted scrypt hash and verifies only the matching password", async () => {

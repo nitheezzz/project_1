@@ -146,33 +146,51 @@ function LoadingScreen() {
 }
 
 function AccountScreen() {
+  type Step =
+    | "account"
+    | "verify_signup"
+    | "set_password"
+    | "verify_legacy"
+    | "forgot_account"
+    | "verify_reset"
+    | "reset_password";
+
   const [mode, setMode] = useState<"login" | "register">("register");
-  const [step, setStep] = useState<"account" | "verify">("account");
+  const [step, setStep] = useState<Step>("account");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [code, setCode] = useState("");
   const [verificationEmail, setVerificationEmail] = useState("");
+  const [signupChallengeId, setSignupChallengeId] = useState("");
+  const [registrationToken, setRegistrationToken] = useState("");
+  const [resetChallengeId, setResetChallengeId] = useState("");
+  const [resetToken, setResetToken] = useState("");
   const [consentRequired, setConsentRequired] = useState(false);
   const [legalConsent, setLegalConsent] = useState(false);
   const [error, setError] = useState("");
-  const registerMutation = trpc.account.register.useMutation();
+  const requestSignupCodeMutation = trpc.account.requestSignupCode.useMutation();
+  const verifySignupCodeMutation = trpc.account.verifySignupCode.useMutation();
+  const completeSignupMutation = trpc.account.completeSignup.useMutation();
   const loginMutation = trpc.account.login.useMutation();
   const verifyEmailMutation = trpc.account.verifyEmail.useMutation();
+  const requestPasswordResetMutation =
+    trpc.account.requestPasswordReset.useMutation();
+  const verifyPasswordResetMutation =
+    trpc.account.verifyPasswordResetCode.useMutation();
+  const completePasswordResetMutation =
+    trpc.account.completePasswordReset.useMutation();
   const utils = trpc.useUtils();
   const busy =
-    registerMutation.isPending ||
+    requestSignupCodeMutation.isPending ||
+    verifySignupCodeMutation.isPending ||
+    completeSignupMutation.isPending ||
     loginMutation.isPending ||
-    verifyEmailMutation.isPending;
-
-  const openVerificationStep = (maskedEmail: string) => {
-    setVerificationEmail(maskedEmail);
-    setCode("");
-    setStep("verify");
-    setError("");
-    toast.success("Your verification code is on its way.");
-  };
+    verifyEmailMutation.isPending ||
+    requestPasswordResetMutation.isPending ||
+    verifyPasswordResetMutation.isPending ||
+    completePasswordResetMutation.isPending;
 
   const finishSignIn = async (message: string) => {
     setConsentRequired(false);
@@ -181,101 +199,222 @@ function AccountScreen() {
     await utils.account.me.invalidate();
   };
 
-  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError("");
-    if (step === "verify") {
-      try {
-        await verifyEmailMutation.mutateAsync({ username, code });
-        await finishSignIn("Email verified. Your workspace is ready.");
-      } catch (requestError) {
-        setError(
-          requestError instanceof Error
-            ? requestError.message
-            : "That code could not be verified. Please try again."
-        );
-      }
-      return;
-    }
-    if ((mode === "register" || consentRequired) && !legalConsent) {
-      setError("Please agree to the Terms & Conditions and Privacy Policy to continue.");
-      return;
-    }
-    if (mode === "register" && password !== confirmPassword) {
-      setError("Those passwords don’t match yet.");
-      return;
-    }
-    try {
-      if (mode === "register") {
-        const result = await registerMutation.mutateAsync({
-          username,
-          email,
-          password,
-          legalConsent: true,
-        });
-        if (result.needsVerification) openVerificationStep(result.email);
-      } else {
-        const result = await loginMutation.mutateAsync({
-          username,
-          password,
-          email: email.trim() || undefined,
-          acceptLegalConsent: legalConsent ? true : undefined,
-        });
-        if (result.needsConsent) {
-          setConsentRequired(true);
-          setLegalConsent(false);
-        } else if (result.needsVerification) {
-          openVerificationStep(result.email);
-        } else {
-          await finishSignIn("Welcome back.");
-        }
-      }
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Something went wrong. Please try again."
-      );
-    }
+  const setRequestError = (requestError: unknown, fallback: string) => {
+    setError(requestError instanceof Error ? requestError.message : fallback);
   };
 
   const switchMode = (next: "login" | "register") => {
     setMode(next);
     setStep("account");
     setCode("");
+    setPassword("");
+    setConfirmPassword("");
+    setSignupChallengeId("");
+    setRegistrationToken("");
+    setResetChallengeId("");
+    setResetToken("");
     setConsentRequired(false);
     setLegalConsent(false);
     setError("");
   };
 
-  const resendCode = async () => {
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     setError("");
     try {
+      if (step === "verify_signup") {
+        const result = await verifySignupCodeMutation.mutateAsync({
+          challengeId: signupChallengeId,
+          code,
+        });
+        setRegistrationToken(result.registrationToken);
+        setCode("");
+        setPassword("");
+        setConfirmPassword("");
+        setStep("set_password");
+        toast.success("Email verified. Create a password to finish signing up.");
+        return;
+      }
+      if (step === "set_password") {
+        if (password !== confirmPassword) {
+          setError("Those passwords don’t match yet.");
+          return;
+        }
+        await completeSignupMutation.mutateAsync({
+          challengeId: signupChallengeId,
+          registrationToken,
+          password,
+          confirmPassword,
+        });
+        await finishSignIn("Your account is ready.");
+        return;
+      }
+      if (step === "verify_legacy") {
+        await verifyEmailMutation.mutateAsync({ username, code });
+        await finishSignIn("Email verified. Your workspace is ready.");
+        return;
+      }
+      if (step === "forgot_account") {
+        const result = await requestPasswordResetMutation.mutateAsync({
+          username,
+          email,
+        });
+        setResetChallengeId(result.challengeId);
+        setCode("");
+        setStep("verify_reset");
+        toast.success(result.message);
+        return;
+      }
+      if (step === "verify_reset") {
+        const result = await verifyPasswordResetMutation.mutateAsync({
+          challengeId: resetChallengeId,
+          code,
+        });
+        setResetToken(result.resetToken);
+        setCode("");
+        setPassword("");
+        setConfirmPassword("");
+        setStep("reset_password");
+        toast.success("Code verified. Choose a new password.");
+        return;
+      }
+      if (step === "reset_password") {
+        if (password !== confirmPassword) {
+          setError("Those passwords don’t match yet.");
+          return;
+        }
+        await completePasswordResetMutation.mutateAsync({
+          challengeId: resetChallengeId,
+          resetToken,
+          newPassword: password,
+          confirmPassword,
+        });
+        setMode("login");
+        setStep("account");
+        setPassword("");
+        setConfirmPassword("");
+        setResetToken("");
+        setResetChallengeId("");
+        toast.success("Password updated. Sign in with your new password.");
+        return;
+      }
+
+      if (mode === "register") {
+        if (!legalConsent) {
+          setError("Please agree to the Terms & Conditions and Privacy Policy to continue.");
+          return;
+        }
+        const result = await requestSignupCodeMutation.mutateAsync({
+          username,
+          email,
+          legalConsent: true,
+        });
+        setSignupChallengeId(result.challengeId);
+        setVerificationEmail(result.email);
+        setCode("");
+        setStep("verify_signup");
+        toast.success("Your verification code is on its way.");
+        return;
+      }
+      if (consentRequired && !legalConsent) {
+        setError("Please agree to the Terms & Conditions and Privacy Policy to continue.");
+        return;
+      }
       const result = await loginMutation.mutateAsync({
         username,
+        email,
         password,
-        email: email.trim() || undefined,
         acceptLegalConsent: legalConsent ? true : undefined,
       });
       if (result.needsConsent) {
-        setStep("account");
         setConsentRequired(true);
         setLegalConsent(false);
       } else if (result.needsVerification) {
         setVerificationEmail(result.email);
         setCode("");
-        toast.success("A verification code was sent.");
+        setStep("verify_legacy");
+        toast.success("Your verification code is on its way.");
       } else {
         await finishSignIn("Welcome back.");
       }
     } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Could not resend the code. Please try again."
-      );
+      setRequestError(requestError, "Something went wrong. Please try again.");
     }
   };
+
+  const resendCode = async () => {
+    setError("");
+    try {
+      if (step === "verify_signup") {
+        const result = await requestSignupCodeMutation.mutateAsync({
+          username,
+          email,
+          legalConsent: true,
+        });
+        setSignupChallengeId(result.challengeId);
+        setVerificationEmail(result.email);
+        setCode("");
+        toast.success("If a new code was needed, it has been sent.");
+      } else if (step === "verify_reset") {
+        const result = await requestPasswordResetMutation.mutateAsync({
+          username,
+          email,
+        });
+        setResetChallengeId(result.challengeId);
+        setCode("");
+        toast.success(result.message);
+      } else if (step === "verify_legacy") {
+        const result = await loginMutation.mutateAsync({
+          username,
+          email,
+          password,
+          acceptLegalConsent: legalConsent ? true : undefined,
+        });
+        if (result.needsVerification) {
+          setVerificationEmail(result.email);
+          setCode("");
+          toast.success("If a new code was needed, it has been sent.");
+        } else if (result.needsConsent) {
+          setStep("account");
+          setConsentRequired(true);
+          setLegalConsent(false);
+        } else {
+          await finishSignIn("Welcome back.");
+        }
+      }
+    } catch (requestError) {
+      setRequestError(requestError, "Could not resend the code. Please try again.");
+    }
+  };
+
+  const verificationStep =
+    step === "verify_signup" || step === "verify_legacy" || step === "verify_reset";
+  const accountStep = step === "account";
+  const passwordStep = step === "set_password" || step === "reset_password";
+  const heading =
+    step === "verify_signup" || step === "verify_reset" || step === "verify_legacy"
+      ? "Check your inbox."
+      : step === "set_password"
+        ? "Create your password."
+        : step === "reset_password"
+          ? "Choose a new password."
+          : step === "forgot_account"
+            ? "Let’s get you back in."
+            : mode === "register"
+              ? "A little more room to focus."
+              : "Good to see you again.";
+  const description =
+    step === "verify_signup" || step === "verify_legacy"
+      ? `Enter the 6-digit code sent to ${verificationEmail}. It expires in 10 minutes.`
+      : step === "verify_reset"
+        ? "If the details match an account, a 6-digit recovery code will be sent to its verified email."
+        : step === "set_password"
+          ? "Email verified. Set a password to finish creating your account."
+          : step === "reset_password"
+            ? "Choose a new password for your account."
+            : step === "forgot_account"
+              ? "Enter your username and the email address on your account."
+              : "Notes, deadlines, and study materials — all in one calm place.";
 
   return (
     <main className="auth-screen">
@@ -294,136 +433,97 @@ function AccountScreen() {
           <span className="eyebrow">
             <Sparkles size={13} /> YOUR QUIETER CORNER
           </span>
-          <h1>
-            {step === "verify" ? (
-              <>
-                Check your
-                <br />
-                <em>inbox.</em>
-              </>
-            ) : mode === "register" ? (
-              <>
-                A little more
-                <br />
-                <em>room to focus.</em>
-              </>
-            ) : (
-              <>
-                Good to see
-                <br />
-                <em>you again.</em>
-              </>
-            )}
-          </h1>
-          <p>
-            {step === "verify"
-              ? `Enter the 6-digit code sent to ${verificationEmail}. It expires in 10 minutes.`
-              : "Notes, deadlines, and study materials — all in one calm place."}
-          </p>
+          <h1>{heading}</h1>
+          <p>{description}</p>
         </div>
-        {step === "account" && (
+        {accountStep && (
           <div className="auth-tabs" role="tablist" aria-label="Account access">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "register"}
-            className={mode === "register" ? "active" : ""}
-            onClick={() => switchMode("register")}
-          >
-            Create account
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "login"}
-            className={mode === "login" ? "active" : ""}
-            onClick={() => switchMode("login")}
-          >
-            Sign in
-          </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "register"}
+              className={mode === "register" ? "active" : ""}
+              onClick={() => switchMode("register")}
+            >
+              Create account
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "login"}
+              className={mode === "login" ? "active" : ""}
+              onClick={() => switchMode("login")}
+            >
+              Sign in
+            </button>
           </div>
         )}
         <form className="form-stack auth-form" onSubmit={submit}>
-          {step === "account" && (
+          {(accountStep || step === "forgot_account") && (
             <>
               <label className="field-label">
-                Email address
+                Username
                 <input
                   className="field-control"
-                  required={mode === "register"}
-                  type="email"
-                  maxLength={320}
-                  autoComplete="email"
-                  value={email}
-                  onChange={event => setEmail(event.target.value)}
-                  placeholder={
-                    mode === "register"
-                      ? "you@example.com"
-                      : "Only needed to verify an older account"
-                  }
+                  required
+                  minLength={3}
+                  maxLength={24}
+                  pattern="[A-Za-z0-9_]+"
+                  autoComplete="username"
+                  value={username}
+                  onChange={event => setUsername(event.target.value)}
+                  placeholder="e.g. studywithnitheesh"
                 />
-                {mode === "register" && (
+                {mode === "register" && accountStep && (
                   <span className="field-hint">
-                    We’ll email a one-time code before opening your workspace.
+                    3–24 characters · letters, numbers, or underscore
                   </span>
                 )}
               </label>
-          <label className="field-label">
-            Username
-            <input
-              className="field-control"
-              required
-              minLength={3}
-              maxLength={24}
-              pattern="[A-Za-z0-9_]+"
-              autoComplete="username"
-              value={username}
-              onChange={event => setUsername(event.target.value)}
-              placeholder="e.g. studywithnitheesh"
-            />
-            {mode === "register" && (
-              <span className="field-hint">
-                3–24 characters · letters, numbers, or underscore
-              </span>
-            )}
-          </label>
-          <label className="field-label">
-            Password
-            <input
-              className="field-control"
-              required
-              minLength={10}
-              maxLength={128}
-              type="password"
-              autoComplete={
-                mode === "register" ? "new-password" : "current-password"
-              }
-              value={password}
-              onChange={event => setPassword(event.target.value)}
-              placeholder={
-                mode === "register" ? "At least 10 characters" : "Your password"
-              }
-            />
-          </label>
-          {mode === "register" && (
-            <label className="field-label">
-              Confirm password
-              <input
-                className="field-control"
-                required
-                minLength={10}
-                maxLength={128}
-                type="password"
-                autoComplete="new-password"
-                value={confirmPassword}
-                onChange={event => setConfirmPassword(event.target.value)}
-                placeholder="Type it once more"
-              />
-            </label>
-          )}
+              {(mode === "register" || mode === "login" || step === "forgot_account") && (
+                <label className="field-label">
+                  Email address
+                  <input
+                    className="field-control"
+                    required
+                    type="email"
+                    maxLength={320}
+                    autoComplete="email"
+                    value={email}
+                    onChange={event => setEmail(event.target.value)}
+                    placeholder="you@example.com"
+                  />
+                  {mode === "register" && accountStep && (
+                    <span className="field-hint">
+                      We’ll verify this address before asking you to create a password.
+                    </span>
+                  )}
+                  {mode === "login" && accountStep && (
+                    <span className="field-hint">
+                      Use the verified email address on your account.
+                    </span>
+                  )}
+                </label>
+              )}
+              {accountStep && mode === "login" && (
+                <label className="field-label">
+                  Password
+                  <input
+                    className="field-control"
+                    required
+                    minLength={10}
+                    maxLength={128}
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={event => setPassword(event.target.value)}
+                    placeholder="Your password"
+                  />
+                </label>
+              )}
             </>
           )}
-          {step === "verify" && (
+          {verificationStep && (
             <>
               <label className="field-label">
                 Verification code
@@ -443,45 +543,89 @@ function AccountScreen() {
                 />
               </label>
               <p className="field-hint">
-                Codes can be used once. If you don’t see the email, check spam.
+                Codes expire after 10 minutes and can be used once. Check spam if needed.
               </p>
             </>
           )}
-          {step === "account" &&
-            (mode === "register" || consentRequired) && (
-              <>
-                {consentRequired && (
-                  <p className="field-hint">
-                    Review and accept the current policies before continuing.
-                  </p>
-                )}
-                <div className="legal-consent">
-                  <input
-                    id="legal-consent"
-                    type="checkbox"
-                    required
-                    checked={legalConsent}
-                    onChange={event => setLegalConsent(event.target.checked)}
-                    aria-labelledby="legal-consent-copy"
-                  />
-                  <span id="legal-consent-copy">
-                    I agree to the{" "}
-                    <a href="/terms" target="_blank" rel="noreferrer">
-                      Terms &amp; Conditions
-                    </a>{" "}
-                    and acknowledge the{" "}
-                    <a href="/privacy" target="_blank" rel="noreferrer">
-                      Privacy Policy
-                    </a>
-                    .
-                  </span>
-                </div>
-              </>
-            )}
+          {passwordStep && (
+            <>
+              <label className="field-label">
+                {step === "set_password" ? "Create password" : "New password"}
+                <input
+                  className="field-control"
+                  required
+                  minLength={10}
+                  maxLength={128}
+                  type="password"
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={event => setPassword(event.target.value)}
+                  placeholder="At least 10 characters"
+                />
+              </label>
+              <label className="field-label">
+                Re-enter password
+                <input
+                  className="field-control"
+                  required
+                  minLength={10}
+                  maxLength={128}
+                  type="password"
+                  autoComplete="new-password"
+                  value={confirmPassword}
+                  onChange={event => setConfirmPassword(event.target.value)}
+                  placeholder="Type it once more"
+                />
+              </label>
+            </>
+          )}
+          {accountStep && (mode === "register" || consentRequired) && (
+            <>
+              {consentRequired && (
+                <p className="field-hint">
+                  Review and accept the current policies before continuing.
+                </p>
+              )}
+              <div className="legal-consent">
+                <input
+                  id="legal-consent"
+                  type="checkbox"
+                  required
+                  checked={legalConsent}
+                  onChange={event => setLegalConsent(event.target.checked)}
+                  aria-labelledby="legal-consent-copy"
+                />
+                <span id="legal-consent-copy">
+                  I agree to the{" "}
+                  <a href="/terms" target="_blank" rel="noreferrer">
+                    Terms &amp; Conditions
+                  </a>{" "}
+                  and acknowledge the{" "}
+                  <a href="/privacy" target="_blank" rel="noreferrer">
+                    Privacy Policy
+                  </a>
+                  .
+                </span>
+              </div>
+            </>
+          )}
           {error && (
             <p className="auth-error" role="alert">
               {error}
             </p>
+          )}
+          {accountStep && mode === "login" && !consentRequired && (
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setStep("forgot_account");
+                setError("");
+              }}
+            >
+              Forgot password?
+            </Button>
           )}
           <Button
             type="submit"
@@ -491,33 +635,38 @@ function AccountScreen() {
           >
             {busy
               ? "One moment…"
-              : step === "verify"
+              : step === "verify_signup" || step === "verify_legacy"
                 ? "Verify email and continue"
-                : mode === "register"
-                  ? "Create my account"
-                  : "Sign in to studywithfun"}
+                : step === "verify_reset"
+                  ? "Verify recovery code"
+                  : step === "set_password"
+                    ? "Create secure account"
+                    : step === "reset_password"
+                      ? "Update password"
+                      : step === "forgot_account"
+                        ? "Send recovery code"
+                        : mode === "register"
+                          ? "Send verification code"
+                          : "Sign in to studywithfun"}
             {!busy && <ArrowRight size={16} />}
           </Button>
-          {step === "verify" && (
+          {(verificationStep || step === "forgot_account" || passwordStep) && (
             <div className="auth-secondary-actions">
+              {verificationStep && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={resendCode}
+                >
+                  Resend code
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="ghost"
                 disabled={busy}
-                onClick={resendCode}
-              >
-                Resend code
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                disabled={busy}
-                onClick={() => {
-                  setStep("account");
-                  setMode("login");
-                  setCode("");
-                  setError("");
-                }}
+                onClick={() => switchMode("login")}
               >
                 Back to sign in
               </Button>

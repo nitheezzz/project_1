@@ -51,4 +51,19 @@ describe("current platform integration", () => {
     vi.stubEnv("MANUS_PROJECT_ID", "different-project");
     expect(await sdk.verifySession(token)).toBeNull();
   });
+
+  it("preserves account session versions in signed JWTs", async () => {
+    vi.stubEnv("MANUS_PROJECT_ID", "project-test");
+    vi.stubEnv("MANUS_JWT_SECRET", "unit-test-signing-key-never-deployed");
+    const token = await sdk.signSession({
+      openId: "user-test",
+      appId: "project-test",
+      name: "Student",
+      sessionVersion: 3,
+    });
+    expect(await sdk.verifySession(token)).toMatchObject({
+      openId: "user-test",
+      sessionVersion: 3,
+    });
+  });
 });

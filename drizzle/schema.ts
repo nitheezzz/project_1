@@ -38,6 +38,7 @@ export const users = mysqlTable(
     verificationSendCount: int("verificationSendCount").default(0).notNull(),
     legalConsentAt: timestamp("legalConsentAt"),
     legalConsentVersion: varchar("legalConsentVersion", { length: 24 }),
+    authVersion: int("authVersion").default(0).notNull(),
     loginMethod: varchar("loginMethod", { length: 64 }),
     role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -60,6 +61,56 @@ export type EmailVerificationPurpose =
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+
+export const accountChallenges = mysqlTable(
+  "account_challenges",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    purpose: mysqlEnum("purpose", ["signup", "password_reset"]).notNull(),
+    userId: int("userId"),
+    username: varchar("username", { length: 24 }).notNull(),
+    email: varchar("email", { length: 320 }).notNull(),
+    verificationCode: varchar("verificationCode", { length: 64 }),
+    expiresAt: timestamp("expiresAt").notNull(),
+    sentAt: timestamp("sentAt").notNull(),
+    attempts: int("attempts").default(0).notNull(),
+    sendWindowAt: timestamp("sendWindowAt"),
+    sendCount: int("sendCount").default(1).notNull(),
+    verifiedAt: timestamp("verifiedAt"),
+    continuationHash: varchar("continuationHash", { length: 64 }),
+    continuationExpiresAt: timestamp("continuationExpiresAt"),
+    consumedAt: timestamp("consumedAt"),
+    legalConsentVersion: varchar("legalConsentVersion", { length: 24 }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    identityUnique: uniqueIndex("account_challenges_purpose_username_unique").on(
+      table.purpose,
+      table.username
+    ),
+    emailIdx: index("account_challenges_email_idx").on(
+      table.purpose,
+      table.email
+    ),
+    userIdx: index("account_challenges_user_idx").on(table.userId),
+    expiryIdx: index("account_challenges_expiry_idx").on(table.expiresAt),
+  })
+);
+
+export type AccountChallenge = typeof accountChallenges.$inferSelect;
+export type InsertAccountChallenge = typeof accountChallenges.$inferInsert;
+
+export const accountCompletionLimits = mysqlTable(
+  "account_completion_limits",
+  {
+    ipHash: varchar("ipHash", { length: 64 }).primaryKey(),
+    windowAt: timestamp("windowAt").notNull(),
+    attempts: int("attempts").default(1).notNull(),
+  },
+  table => ({
+    windowIdx: index("account_completion_limits_window_idx").on(table.windowAt),
+  })
+);
 
 export const friendRequests = mysqlTable(
   "friend_requests",

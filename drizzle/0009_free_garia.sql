@@ -1,0 +1,1 @@
+ALTER TABLE `users` ADD `authVersion` int DEFAULT 0 NOT NULL;

@@ -57,6 +57,27 @@
       "when": 1792942293875,
       "tag": "0007_otp_send_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1793024318436,
+      "tag": "0008_tranquil_makkari",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1793024671088,
+      "tag": "0009_free_garia",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1793025025958,
+      "tag": "0010_slow_firedrake",
+      "breakpoints": true
     }
   ]
 }

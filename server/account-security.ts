@@ -2,7 +2,6 @@ import {
   createHmac,
   randomBytes,
   randomInt,
-  randomUUID,
   scrypt as scryptCallback,
   timingSafeEqual,
 } from "node:crypto";
@@ -24,6 +23,8 @@ export const MAX_EMAIL_OTP_SENDS_PER_ACCOUNT = 5;
 const MAX_EMAIL_OTP_SENDS_PER_IP = 20;
 export const EMAIL_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 export const MAX_EMAIL_OTP_ATTEMPTS = 5;
+export const MAX_ACCOUNT_COMPLETION_ATTEMPTS_PER_IP = 40;
+export const ACCOUNT_COMPLETION_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const DUMMY_HASH = `scrypt:${SCRYPT_N}:${SCRYPT_R}:${SCRYPT_P}:${"0".repeat(32)}:${"0".repeat(128)}`;
 
 type RateBucket = { count: number; resetsAt: number };
@@ -142,6 +143,87 @@ export function matchesEmailVerificationCode(
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+export type AccountChallengePurpose = "signup" | "password_reset";
+
+export function createAccountChallengeCodeHash(
+  purpose: AccountChallengePurpose,
+  challengeId: string,
+  username: string,
+  email: string,
+  code: string,
+  secret = ENV.cookieSecret
+) {
+  if (!secret) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Email verification is not available right now.",
+    });
+  }
+  return createHmac("sha256", secret)
+    .update(
+      `account-challenge\0${purpose}\0${challengeId}\0${normalizeUsername(username)}\0${normalizeEmail(email)}\0${code}`
+    )
+    .digest("hex");
+}
+
+export function matchesAccountChallengeCode(
+  purpose: AccountChallengePurpose,
+  challengeId: string,
+  username: string,
+  email: string,
+  code: string,
+  storedHash: string | null,
+  secret = ENV.cookieSecret
+) {
+  if (!storedHash || !/^[a-f0-9]{64}$/.test(storedHash)) return false;
+  const expected = Buffer.from(storedHash, "hex");
+  const actual = Buffer.from(
+    createAccountChallengeCodeHash(
+      purpose,
+      challengeId,
+      username,
+      email,
+      code,
+      secret
+    ),
+    "hex"
+  );
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+export function createAccountContinuationToken() {
+  return randomBytes(32).toString("base64url");
+}
+
+export function hashAccountContinuationToken(
+  purpose: AccountChallengePurpose,
+  challengeId: string,
+  token: string,
+  secret = ENV.cookieSecret
+) {
+  if (!secret) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Account security is not available right now.",
+    });
+  }
+  return createHmac("sha256", secret)
+    .update(`account-continuation\0${purpose}\0${challengeId}\0${token}`)
+    .digest("hex");
+}
+
+export function hashAccountCompletionIp(ip: string, secret = ENV.cookieSecret) {
+  if (!secret) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Account security is not available right now.",
+    });
+  }
+  return createHmac("sha256", secret)
+    .update(`account-completion-ip\0${ip}`)
+    .digest("hex");
+}
+
 export function assertEmailOtpSendAllowed(ip: string, email: string) {
   assertUnderLimit(
     `email-otp-address:${normalizeEmail(email)}`,
@@ -218,48 +300,6 @@ export function normalizeUsername(username: string) {
   return username.trim().toLowerCase();
 }
 
-export async function registerPasswordUser(
-  username: string,
-  password: string,
-  email: string,
-  legalConsentVersion: string
-) {
-  const normalized = normalizeUsername(username);
-  const existing = await db.getUserByUsername(normalized);
-  const existingEmail = await db.getUserByEmail(normalizeEmail(email));
-  if (existing || existingEmail) {
-    throw new TRPCError({
-      code: "CONFLICT",
-      message: "That username or email is already in use.",
-    });
-  }
-  const passwordHash = await hashPassword(password);
-  try {
-    const user = await db.createPasswordUser({
-      openId: `local_${randomUUID()}`,
-      username: normalized,
-      passwordHash,
-      email: normalizeEmail(email),
-      legalConsentVersion,
-    });
-    if (!user) throw new Error("New account could not be loaded");
-    return user;
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "ER_DUP_ENTRY"
-    ) {
-      throw new TRPCError({
-        code: "CONFLICT",
-        message: "That username or email is already in use.",
-      });
-    }
-    throw error;
-  }
-}
-
 export async function authenticatePasswordUser(
   username: string,
   password: string
@@ -273,7 +313,7 @@ export async function authenticatePasswordUser(
   if (!user || !valid || user.loginMethod !== "password") {
     throw new TRPCError({
       code: "UNAUTHORIZED",
-      message: "Invalid username or password.",
+      message: "Invalid username, email, or password.",
     });
   }
   return user;

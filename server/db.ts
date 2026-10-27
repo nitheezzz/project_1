@@ -5,6 +5,7 @@ import {
   eq,
   gt,
   inArray,
+  isNotNull,
   isNull,
   like,
   lt,
@@ -19,6 +20,10 @@ import {
   InsertStudyMaterial,
   InsertTask,
   InsertUser,
+  AccountChallenge,
+  InsertAccountChallenge,
+  accountChallenges,
+  accountCompletionLimits,
   EmailVerificationPurpose,
   directMessages,
   friendRequests,
@@ -117,6 +122,339 @@ export async function getUserByEmail(email: string): Promise<User | undefined> {
     .where(or(eq(users.email, email), eq(users.pendingEmail, email)))
     .limit(1);
   return result[0];
+}
+
+export async function getAccountChallengeByUsername(
+  purpose: AccountChallenge["purpose"],
+  username: string
+): Promise<AccountChallenge | undefined> {
+  const database = requireDb(await getDb());
+  const result = await database
+    .select()
+    .from(accountChallenges)
+    .where(
+      and(
+        eq(accountChallenges.purpose, purpose),
+        eq(accountChallenges.username, username)
+      )
+    )
+    .limit(1);
+  return result[0];
+}
+
+export async function getAccountChallengeById(
+  id: string
+): Promise<AccountChallenge | undefined> {
+  const database = requireDb(await getDb());
+  const result = await database
+    .select()
+    .from(accountChallenges)
+    .where(eq(accountChallenges.id, id))
+    .limit(1);
+  return result[0];
+}
+
+export async function isAccountChallengeContinuationValid(
+  id: string,
+  purpose: AccountChallenge["purpose"],
+  continuationHash: string,
+  now: Date
+): Promise<boolean> {
+  const database = requireDb(await getDb());
+  const result = await database
+    .select({ id: accountChallenges.id })
+    .from(accountChallenges)
+    .where(
+      and(
+        eq(accountChallenges.id, id),
+        eq(accountChallenges.purpose, purpose),
+        eq(accountChallenges.continuationHash, continuationHash),
+        gt(accountChallenges.continuationExpiresAt, now),
+        isNotNull(accountChallenges.verifiedAt),
+        isNull(accountChallenges.consumedAt)
+      )
+    )
+    .limit(1);
+  return result.length === 1;
+}
+
+export async function claimAccountCompletionAttempt(
+  ipHash: string,
+  maxAttempts: number,
+  windowMs: number,
+  now: Date
+): Promise<boolean> {
+  const database = requireDb(await getDb());
+  const windowStart = new Date(now.getTime() - windowMs);
+  await database
+    .delete(accountCompletionLimits)
+    .where(lte(accountCompletionLimits.windowAt, windowStart));
+  await database
+    .insert(accountCompletionLimits)
+    .values({ ipHash, windowAt: now, attempts: 1 })
+    .onDuplicateKeyUpdate({
+      set: {
+        attempts: sql`CASE WHEN ${accountCompletionLimits.windowAt} <= ${windowStart} THEN 1 ELSE ${accountCompletionLimits.attempts} + 1 END`,
+        windowAt: sql`CASE WHEN ${accountCompletionLimits.windowAt} <= ${windowStart} THEN ${now} ELSE ${accountCompletionLimits.windowAt} END`,
+      },
+    });
+  const result = await database
+    .select({ attempts: accountCompletionLimits.attempts })
+    .from(accountCompletionLimits)
+    .where(eq(accountCompletionLimits.ipHash, ipHash))
+    .limit(1);
+  return Boolean(result[0] && result[0].attempts <= maxAttempts);
+}
+
+export async function saveAccountChallenge(
+  values: InsertAccountChallenge,
+  maxSends: number,
+  windowMs: number,
+  now: Date
+): Promise<AccountChallenge | undefined> {
+  const database = requireDb(await getDb());
+  const windowStart = new Date(now.getTime() - windowMs);
+  await database
+    .delete(accountChallenges)
+    .where(
+      and(
+        lt(accountChallenges.expiresAt, now),
+        or(
+          isNull(accountChallenges.sendWindowAt),
+          lte(accountChallenges.sendWindowAt, windowStart)
+        )
+      )
+    );
+  const resetWindow =
+    isNull(accountChallenges.sendWindowAt) ||
+    lte(accountChallenges.sendWindowAt, windowStart);
+  await database
+    .insert(accountChallenges)
+    .values(values)
+    .onDuplicateKeyUpdate({
+      set: {
+        id: values.id,
+        userId: values.userId,
+        email: values.email,
+        verificationCode: values.verificationCode,
+        expiresAt: values.expiresAt,
+        sentAt: values.sentAt,
+        attempts: 0,
+        verifiedAt: null,
+        continuationHash: null,
+        continuationExpiresAt: null,
+        consumedAt: null,
+        legalConsentVersion: values.legalConsentVersion,
+        sendCount: sql`CASE WHEN ${resetWindow} THEN 1 ELSE ${accountChallenges.sendCount} + 1 END`,
+        sendWindowAt: sql`CASE WHEN ${resetWindow} THEN ${now} ELSE ${accountChallenges.sendWindowAt} END`,
+      },
+    });
+  const result = await database
+    .select()
+    .from(accountChallenges)
+    .where(eq(accountChallenges.id, values.id))
+    .limit(1);
+  const saved = result[0];
+  return saved && saved.sendCount <= maxSends ? saved : undefined;
+}
+
+export async function clearAccountChallenge(
+  id: string,
+  verificationCodeHash: string
+) {
+  const database = requireDb(await getDb());
+  await database
+    .update(accountChallenges)
+    .set({
+      verificationCode: null,
+      consumedAt: new Date(),
+      continuationHash: null,
+      continuationExpiresAt: null,
+    })
+    .where(
+      and(
+        eq(accountChallenges.id, id),
+        eq(accountChallenges.verificationCode, verificationCodeHash)
+      )
+    );
+}
+
+export async function incrementAccountChallengeAttempts(
+  id: string,
+  purpose: AccountChallenge["purpose"],
+  verificationCodeHash: string,
+  maxAttempts: number,
+  now: Date
+) {
+  const database = requireDb(await getDb());
+  const result = await database
+    .update(accountChallenges)
+    .set({ attempts: sql`${accountChallenges.attempts} + 1` })
+    .where(
+      and(
+        eq(accountChallenges.id, id),
+        eq(accountChallenges.purpose, purpose),
+        eq(accountChallenges.verificationCode, verificationCodeHash),
+        gt(accountChallenges.expiresAt, now),
+        lt(accountChallenges.attempts, maxAttempts),
+        isNull(accountChallenges.consumedAt),
+        isNull(accountChallenges.verifiedAt)
+      )
+    );
+  return Number(result[0].affectedRows) === 1;
+}
+
+export async function completeAccountChallengeVerification(
+  id: string,
+  purpose: AccountChallenge["purpose"],
+  verificationCodeHash: string,
+  continuationHash: string,
+  continuationExpiresAt: Date,
+  maxAttempts: number,
+  now: Date
+) {
+  const database = requireDb(await getDb());
+  const result = await database
+    .update(accountChallenges)
+    .set({
+      verificationCode: null,
+      verifiedAt: now,
+      continuationHash,
+      continuationExpiresAt,
+    })
+    .where(
+      and(
+        eq(accountChallenges.id, id),
+        eq(accountChallenges.purpose, purpose),
+        eq(accountChallenges.verificationCode, verificationCodeHash),
+        gt(accountChallenges.expiresAt, now),
+        lt(accountChallenges.attempts, maxAttempts),
+        isNull(accountChallenges.consumedAt),
+        isNull(accountChallenges.verifiedAt)
+      )
+    );
+  return Number(result[0].affectedRows) === 1;
+}
+
+export async function completeAccountChallengeSignup(
+  id: string,
+  continuationHash: string,
+  values: { openId: string; passwordHash: string },
+  now: Date
+): Promise<User | undefined> {
+  const database = requireDb(await getDb());
+  const openId = await database.transaction(async tx => {
+    const result = await tx
+      .select()
+      .from(accountChallenges)
+      .where(eq(accountChallenges.id, id))
+      .limit(1);
+    const challenge = result[0];
+    if (
+      !challenge ||
+      challenge.purpose !== "signup" ||
+      !challenge.verifiedAt ||
+      !challenge.legalConsentVersion ||
+      !challenge.continuationExpiresAt ||
+      challenge.continuationExpiresAt <= now
+    ) {
+      return undefined;
+    }
+    const claim = await tx
+      .update(accountChallenges)
+      .set({ consumedAt: now })
+      .where(
+        and(
+          eq(accountChallenges.id, id),
+          eq(accountChallenges.purpose, "signup"),
+          eq(accountChallenges.continuationHash, continuationHash),
+          gt(accountChallenges.continuationExpiresAt, now),
+          isNotNull(accountChallenges.verifiedAt),
+          isNull(accountChallenges.consumedAt)
+        )
+      );
+    if (Number(claim[0].affectedRows) !== 1) return undefined;
+    await tx.insert(users).values({
+      openId: values.openId,
+      username: challenge.username,
+      passwordHash: values.passwordHash,
+      email: challenge.email,
+      emailVerified: true,
+      legalConsentAt: now,
+      legalConsentVersion: challenge.legalConsentVersion,
+      name: challenge.username,
+      loginMethod: "password",
+      role: "user",
+      lastSignedIn: now,
+    });
+    return values.openId;
+  });
+  return openId ? getUserByOpenId(openId) : undefined;
+}
+
+export async function completeAccountChallengePasswordReset(
+  id: string,
+  continuationHash: string,
+  passwordHash: string,
+  now: Date
+): Promise<boolean> {
+  const database = requireDb(await getDb());
+  const missingAccount = new Error("Password-reset account is unavailable.");
+  try {
+    return await database.transaction(async tx => {
+      const result = await tx
+        .select()
+        .from(accountChallenges)
+        .where(eq(accountChallenges.id, id))
+        .limit(1);
+      const challenge = result[0];
+      if (
+        !challenge ||
+        challenge.purpose !== "password_reset" ||
+        !challenge.userId ||
+        !challenge.verifiedAt ||
+        !challenge.continuationExpiresAt ||
+        challenge.continuationExpiresAt <= now
+      ) {
+        return false;
+      }
+      const claim = await tx
+        .update(accountChallenges)
+        .set({ consumedAt: now })
+        .where(
+          and(
+            eq(accountChallenges.id, id),
+            eq(accountChallenges.purpose, "password_reset"),
+            eq(accountChallenges.continuationHash, continuationHash),
+            gt(accountChallenges.continuationExpiresAt, now),
+            isNotNull(accountChallenges.verifiedAt),
+            isNull(accountChallenges.consumedAt)
+          )
+        );
+      if (Number(claim[0].affectedRows) !== 1) return false;
+      const changed = await tx
+        .update(users)
+        .set({
+          passwordHash,
+          authVersion: sql`${users.authVersion} + 1`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(users.id, challenge.userId),
+            eq(users.username, challenge.username),
+            eq(users.email, challenge.email),
+            eq(users.emailVerified, true),
+            eq(users.loginMethod, "password")
+          )
+        );
+      if (Number(changed[0].affectedRows) !== 1) throw missingAccount;
+      return true;
+    });
+  } catch (error) {
+    if (error === missingAccount) return false;
+    throw error;
+  }
 }
 
 export async function updateUserEmailChallenge(

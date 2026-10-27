@@ -27,16 +27,27 @@ import {
   recordLoginFailure,
   recordEmailOtpSend,
   recordRegistrationAttempt,
-  registerPasswordUser,
+  createAccountChallengeCodeHash,
+  createAccountContinuationToken,
+  hashAccountCompletionIp,
+  hashAccountContinuationToken,
+  matchesAccountChallengeCode,
   hashPassword,
   verifyPassword,
+  ACCOUNT_COMPLETION_ATTEMPT_WINDOW_MS,
+  MAX_ACCOUNT_COMPLETION_ATTEMPTS_PER_IP,
 } from "./account-security";
 import * as db from "./db";
 import {
   assertEmailDeliveryConfigured,
   sendVerificationEmail,
 } from "./email";
-import type { EmailVerificationPurpose, User } from "../drizzle/schema";
+import type {
+  AccountChallenge,
+  EmailVerificationPurpose,
+  User,
+} from "../drizzle/schema";
+import type { AccountChallengePurpose } from "./account-security";
 
 const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
 const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
@@ -106,11 +117,12 @@ async function startAccountSession(
     req: Parameters<typeof getSessionCookieOptions>[0];
     res: { cookie: (name: string, value: string, options: object) => void };
   },
-  user: { openId: string; name: string | null; username: string | null }
+  user: Pick<User, "openId" | "name" | "username" | "authVersion">
 ) {
   const token = await sdk.createSessionToken(user.openId, {
     name: user.username || user.name || "studywithfun user",
     expiresInMs: ONE_YEAR_MS,
+    sessionVersion: user.authVersion,
   });
   ctx.res.cookie(COOKIE_NAME, token, {
     ...getSessionCookieOptions(ctx.req),
@@ -142,6 +154,7 @@ function publicAccount(ctx: { user: User | null }) {
 }
 
 const EMAIL_OTP_TTL_MS = 10 * 60 * 1000;
+const ACCOUNT_CONTINUATION_TTL_MS = 15 * 60 * 1000;
 
 function clientIp(ctx: { req: { ip?: string; socket: { remoteAddress?: string } } }) {
   return ctx.req.ip || ctx.req.socket.remoteAddress || "unknown";
@@ -312,6 +325,187 @@ async function verifyStoredEmailCode(
   }
 }
 
+async function issueAccountChallenge(
+  ip: string,
+  input: {
+    purpose: AccountChallengePurpose;
+    username: string;
+    email: string;
+    userId: number | null;
+    legalConsentVersion?: string | null;
+    rateLimitAlreadyApplied?: boolean;
+  }
+) {
+  assertEmailDeliveryConfigured();
+  const username = normalizeUsername(input.username);
+  const email = normalizeEmail(input.email);
+  const now = new Date();
+  const previous = await db.getAccountChallengeByUsername(
+    input.purpose,
+    username
+  );
+  if (
+    previous &&
+    previous.expiresAt > now &&
+    !previous.consumedAt &&
+    !previous.verifiedAt &&
+    now.getTime() - previous.sentAt.getTime() < EMAIL_OTP_RESEND_COOLDOWN_MS
+  ) {
+    if (previous.email === email) return previous.id;
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: "Wait a minute before requesting another code.",
+    });
+  }
+
+  if (!input.rateLimitAlreadyApplied) {
+    assertEmailOtpSendAllowed(ip, email);
+  }
+  const challengeId = randomUUID();
+  const code = createEmailVerificationCode();
+  const codeHash = createAccountChallengeCodeHash(
+    input.purpose,
+    challengeId,
+    username,
+    email,
+    code
+  );
+  const saved = await db.saveAccountChallenge(
+    {
+      id: challengeId,
+      purpose: input.purpose,
+      userId: input.userId,
+      username,
+      email,
+      verificationCode: codeHash,
+      expiresAt: new Date(now.getTime() + EMAIL_OTP_TTL_MS),
+      sentAt: now,
+      attempts: 0,
+      sendWindowAt: now,
+      sendCount: 1,
+      verifiedAt: null,
+      continuationHash: null,
+      continuationExpiresAt: null,
+      consumedAt: null,
+      legalConsentVersion: input.legalConsentVersion ?? null,
+    },
+    MAX_EMAIL_OTP_SENDS_PER_ACCOUNT,
+    EMAIL_OTP_SEND_WINDOW_MS,
+    now
+  );
+  if (!saved) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: "Too many verification emails were requested for this account. Try again later.",
+    });
+  }
+  if (!input.rateLimitAlreadyApplied) recordEmailOtpSend(ip, email);
+  try {
+    await sendVerificationEmail(
+      email,
+      code,
+      input.purpose === "password_reset" ? "password_reset" : "verification"
+    );
+  } catch (error) {
+    await db.clearAccountChallenge(challengeId, codeHash);
+    throw error;
+  }
+  return challengeId;
+}
+
+async function assertAccountCompletionAllowed(ip: string) {
+  const allowed = await db.claimAccountCompletionAttempt(
+    hashAccountCompletionIp(ip),
+    MAX_ACCOUNT_COMPLETION_ATTEMPTS_PER_IP,
+    ACCOUNT_COMPLETION_ATTEMPT_WINDOW_MS,
+    new Date()
+  );
+  if (!allowed) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: "Too many account completion attempts. Please try again in 15 minutes.",
+    });
+  }
+}
+
+async function verifyAccountChallenge(
+  challengeId: string,
+  purpose: AccountChallengePurpose,
+  code: string
+) {
+  const challenge = await db.getAccountChallengeById(challengeId);
+  const now = new Date();
+  if (
+    !challenge ||
+    challenge.purpose !== purpose ||
+    !challenge.verificationCode ||
+    challenge.verifiedAt ||
+    challenge.consumedAt ||
+    challenge.expiresAt <= now
+  ) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That verification code is invalid or has expired.",
+    });
+  }
+  if (challenge.attempts >= MAX_EMAIL_OTP_ATTEMPTS) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: "Too many incorrect codes. Request a new verification email.",
+    });
+  }
+  const valid = matchesAccountChallengeCode(
+    purpose,
+    challenge.id,
+    challenge.username,
+    challenge.email,
+    code,
+    challenge.verificationCode
+  );
+  if (!valid) {
+    const counted = await db.incrementAccountChallengeAttempts(
+      challenge.id,
+      purpose,
+      challenge.verificationCode,
+      MAX_EMAIL_OTP_ATTEMPTS,
+      now
+    );
+    if (!counted) {
+      throw new TRPCError({
+        code: "TOO_MANY_REQUESTS",
+        message: "Too many incorrect codes. Request a new verification email.",
+      });
+    }
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That verification code is not correct.",
+    });
+  }
+
+  const continuationToken = createAccountContinuationToken();
+  const continuationHash = hashAccountContinuationToken(
+    purpose,
+    challenge.id,
+    continuationToken
+  );
+  const verified = await db.completeAccountChallengeVerification(
+    challenge.id,
+    purpose,
+    challenge.verificationCode,
+    continuationHash,
+    new Date(now.getTime() + ACCOUNT_CONTINUATION_TTL_MS),
+    MAX_EMAIL_OTP_ATTEMPTS,
+    now
+  );
+  if (!verified) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "That verification code is invalid, expired, or already used.",
+    });
+  }
+  return { challenge, continuationToken };
+}
+
 function clearAccountCookie(ctx: {
   req: Parameters<typeof getSessionCookieOptions>[0];
   res: { clearCookie: (name: string, options: object) => void };
@@ -326,11 +520,10 @@ function clearAccountCookie(ctx: {
 export const appRouter = router({
   system: systemRouter,
   account: router({
-    register: publicProcedure
+    requestSignupCode: publicProcedure
       .input(
         z.object({
           username: usernameInput,
-          password: passwordInput,
           email: emailInput,
           legalConsent: z.literal(true),
         })
@@ -340,26 +533,121 @@ export const appRouter = router({
         assertRegistrationAllowed(ip);
         assertEmailDeliveryConfigured();
         recordRegistrationAttempt(ip);
-        const user = await registerPasswordUser(
-          input.username,
-          input.password,
-          input.email,
-          LEGAL_VERSION
-        );
-        const email = await issueEmailChallenge(
+        const username = normalizeUsername(input.username);
+        if (
+          (await db.getUserByUsername(username)) ||
+          (await db.getUserByEmail(input.email))
+        ) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "That username or email is already in use.",
+          });
+        }
+        const challengeId = await issueAccountChallenge(
           ip,
-          user,
-          input.email,
-          "registration"
+          {
+            purpose: "signup",
+            username,
+            email: input.email,
+            userId: null,
+            legalConsentVersion: LEGAL_VERSION,
+          }
         );
-        return { needsVerification: true as const, email };
+        return { challengeId, email: maskEmail(input.email) };
+      }),
+    verifySignupCode: publicProcedure
+      .input(z.object({ challengeId: z.string().uuid(), code: verificationCodeInput }))
+      .mutation(async ({ input }) => {
+        const result = await verifyAccountChallenge(
+          input.challengeId,
+          "signup",
+          input.code
+        );
+        return { registrationToken: result.continuationToken };
+      }),
+    completeSignup: publicProcedure
+      .input(
+        z
+          .object({
+            challengeId: z.string().uuid(),
+            registrationToken: z.string().min(32).max(128),
+            password: passwordInput,
+            confirmPassword: passwordInput,
+          })
+          .refine(input => input.password === input.confirmPassword, {
+            message: "Passwords do not match.",
+            path: ["confirmPassword"],
+          })
+      )
+    .mutation(async ({ ctx, input }) => {
+        await assertAccountCompletionAllowed(clientIp(ctx));
+        const challenge = await db.getAccountChallengeById(input.challengeId);
+        if (
+          !challenge ||
+          challenge.purpose !== "signup" ||
+          challenge.legalConsentVersion !== LEGAL_VERSION
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Signup verification expired. Please start again and accept the current policies.",
+          });
+        }
+        const continuationHash = hashAccountContinuationToken(
+          "signup",
+          input.challengeId,
+          input.registrationToken
+        );
+        const validContinuation =
+          await db.isAccountChallengeContinuationValid(
+            input.challengeId,
+            "signup",
+            continuationHash,
+            new Date()
+          );
+        if (!validContinuation) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Signup verification expired or was already used. Please start again.",
+          });
+        }
+        const passwordHash = await hashPassword(input.password);
+        let user: User | undefined;
+        try {
+          user = await db.completeAccountChallengeSignup(
+            input.challengeId,
+            continuationHash,
+            { openId: `local_${randomUUID()}`, passwordHash },
+            new Date()
+          );
+        } catch (error) {
+          if (
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "ER_DUP_ENTRY"
+          ) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: "That username or email is already in use.",
+            });
+          }
+          throw error;
+        }
+        if (!user) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Signup verification expired or was already used. Please start again.",
+          });
+        }
+        await startAccountSession(ctx, user);
+        return { success: true as const };
       }),
     login: publicProcedure
       .input(
         z.object({
           username: usernameInput,
           password: passwordInput,
-          email: emailInput.optional(),
+          email: emailInput,
           acceptLegalConsent: z.boolean().optional(),
         })
       )
@@ -374,6 +662,16 @@ export const appRouter = router({
             recordLoginFailure(ip, input.username);
           }
           throw error;
+        }
+        if (
+          user.emailVerified &&
+          (!user.email || normalizeEmail(user.email) !== input.email)
+        ) {
+          recordLoginFailure(ip, input.username);
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Invalid username, email, or password.",
+          });
         }
         clearLoginFailures(ip, input.username);
         if (
@@ -394,15 +692,7 @@ export const appRouter = router({
           user = consentedUser;
         }
         if (!user.emailVerified) {
-          const email = normalizeEmail(
-            input.email ?? user.pendingEmail ?? user.email ?? ""
-          );
-          if (!email) {
-            throw new TRPCError({
-              code: "BAD_REQUEST",
-              message: "Enter an email address to verify this account.",
-            });
-          }
+          const email = input.email;
           assertEmailDeliveryConfigured();
           await assertEmailAvailable(email, user.id);
           const maskedEmail = await issueEmailChallenge(
@@ -456,6 +746,108 @@ export const appRouter = router({
         }
         await startAccountSession(ctx, verifiedUser);
         return { success: true } as const;
+      }),
+    requestPasswordReset: publicProcedure
+      .input(z.object({ username: usernameInput, email: emailInput }))
+      .mutation(async ({ ctx, input }) => {
+        assertEmailDeliveryConfigured();
+        const ip = clientIp(ctx);
+        assertEmailOtpSendAllowed(ip, input.email);
+        recordEmailOtpSend(ip, input.email);
+        const username = normalizeUsername(input.username);
+        const user = await db.getUserByUsername(username);
+        if (
+          !user?.emailVerified ||
+          !user.email ||
+          normalizeEmail(user.email) !== input.email ||
+          user.loginMethod !== "password" ||
+          !user.passwordHash
+        ) {
+          return {
+            challengeId: randomUUID(),
+            message:
+              "If those details match an account, a recovery code will be sent to its verified email.",
+          };
+        }
+        try {
+          const challengeId = await issueAccountChallenge(ip, {
+            purpose: "password_reset",
+            username,
+            email: input.email,
+            userId: user.id,
+            rateLimitAlreadyApplied: true,
+          });
+          return {
+            challengeId,
+            message:
+              "If those details match an account, a recovery code will be sent to its verified email.",
+          };
+        } catch {
+          return {
+            challengeId: randomUUID(),
+            message:
+              "If those details match an account, a recovery code will be sent to its verified email.",
+          };
+        }
+      }),
+    verifyPasswordResetCode: publicProcedure
+      .input(z.object({ challengeId: z.string().uuid(), code: verificationCodeInput }))
+      .mutation(async ({ input }) => {
+        const result = await verifyAccountChallenge(
+          input.challengeId,
+          "password_reset",
+          input.code
+        );
+        return { resetToken: result.continuationToken };
+      }),
+    completePasswordReset: publicProcedure
+      .input(
+        z
+          .object({
+            challengeId: z.string().uuid(),
+            resetToken: z.string().min(32).max(128),
+            newPassword: passwordInput,
+            confirmPassword: passwordInput,
+          })
+          .refine(input => input.newPassword === input.confirmPassword, {
+            message: "Passwords do not match.",
+            path: ["confirmPassword"],
+          })
+      )
+      .mutation(async ({ ctx, input }) => {
+        await assertAccountCompletionAllowed(clientIp(ctx));
+        const continuationHash = hashAccountContinuationToken(
+          "password_reset",
+          input.challengeId,
+          input.resetToken
+        );
+        const validContinuation =
+          await db.isAccountChallengeContinuationValid(
+            input.challengeId,
+            "password_reset",
+            continuationHash,
+            new Date()
+          );
+        if (!validContinuation) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "The recovery session expired or was already used. Request a new code.",
+          });
+        }
+        const passwordHash = await hashPassword(input.newPassword);
+        const updated = await db.completeAccountChallengePasswordReset(
+          input.challengeId,
+          continuationHash,
+          passwordHash,
+          new Date()
+        );
+        if (!updated) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "The recovery session expired or was already used. Request a new code.",
+          });
+        }
+        return { success: true as const };
       }),
     requestEmailChange: localUserProcedure
       .input(

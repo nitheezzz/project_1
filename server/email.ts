@@ -11,8 +11,17 @@ export function assertEmailDeliveryConfigured() {
   }
 }
 
-export async function sendVerificationEmail(to: string, code: string) {
+export async function sendVerificationEmail(
+  to: string,
+  code: string,
+  purpose: "verification" | "password_reset" = "verification"
+) {
   assertEmailDeliveryConfigured();
+  const isPasswordReset = purpose === "password_reset";
+  const subject = isPasswordReset
+    ? "Your studywithfun password reset code"
+    : "Your studywithfun verification code";
+  const action = isPasswordReset ? "reset your password" : "verify your email";
   let response: Response;
   try {
     response = await fetch("https://api.resend.com/emails", {
@@ -24,9 +33,9 @@ export async function sendVerificationEmail(to: string, code: string) {
       body: JSON.stringify({
         from: ENV.resendFromEmail,
         to: [to],
-        subject: "Your studywithfun verification code",
-        text: `Your studywithfun verification code is ${code}. It expires in 10 minutes. If you did not request this code, you can ignore this email.`,
-        html: `<div style="font-family:Arial,sans-serif;color:#242424"><p>Use this code to verify your studywithfun email:</p><p style="font-size:28px;font-weight:700;letter-spacing:6px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>`,
+        subject,
+        text: `Use this code to ${action}: ${code}. It expires in 10 minutes. If you did not request it, you can ignore this email.`,
+        html: `<div style="font-family:Arial,sans-serif;color:#242424"><p>Use this code to ${action}:</p><p style="font-size:28px;font-weight:700;letter-spacing:6px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>`,
       }),
       signal: AbortSignal.timeout(12_000),
     });
